@@ -5,7 +5,10 @@
 
 # Runtime state
 limits.db
+limits.console.db
 *.db-journal
+*.db-wal
+*.db-shm
 failed_webhooks/
 
 # Python

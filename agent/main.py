@@ -88,27 +88,55 @@ WRAPUP_INSTRUCTIONS = (
 )
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _first_string(*candidates: object) -> str | None:
+    """Return the first candidate that is a genuinely usable string.
+
+    Truthiness is not enough: in console mode livekit hands us an autospec mock
+    whose every unpinned attribute is a truthy MagicMock, so `x or y` happily
+    selects a mock. Only a non-empty str counts.
+    """
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _caller_id_from(participant: rtc.RemoteParticipant | None) -> str:
     if participant is None:
         return CONSOLE_CALLER_ID
-    attributes = participant.attributes or {}
+
+    attributes = getattr(participant, "attributes", None)
+    if not isinstance(attributes, dict):  # a mock, or None, is not a dict
+        attributes = {}
+
     # LiveKit SIP puts the caller's number here; fall back to identity for web/SDK callers.
     return (
-        attributes.get("sip.phoneNumber")
-        or attributes.get("sip.from_number")
-        or participant.identity
+        _first_string(
+            attributes.get("sip.phoneNumber"),
+            attributes.get("sip.from_number"),
+            getattr(participant, "identity", None),
+        )
         or UNKNOWN_CALLER
     )
 
 
 async def _wait_for_caller(ctx: JobContext) -> rtc.RemoteParticipant | None:
-    """Resolve the caller, or None in console mode where there is no remote participant."""
+    """Wait for the caller to appear, or give up and treat the call as anonymous.
+
+    Note console mode DOES produce a participant — a MagicMock one — so this
+    returning non-None says nothing about whether we're on a real call. Use
+    ctx.is_fake_job() for that.
+    """
     try:
         return await asyncio.wait_for(
             ctx.wait_for_participant(), timeout=PARTICIPANT_WAIT_SECONDS
         )
     except asyncio.TimeoutError:
-        logger.info("no remote participant appeared; treating this as a console session")
+        logger.info("no participant appeared within %ss", PARTICIPANT_WAIT_SECONDS)
         return None
 
 
@@ -138,20 +166,38 @@ async def _turn_away(ctx: JobContext, message: str, language) -> None:
 async def entrypoint(ctx: JobContext) -> None:
     language = get_language()
     config = LimitConfig.from_env()
-    limiter = RateLimiter(
-        os.environ.get("RATE_LIMIT_DB_PATH", "limits.db"), config=config
+
+    # Console mode is a local mic test, not a caller. It gets its own counter file so
+    # test calls never eat into the real line's 50-call / $10 daily budget.
+    console = ctx.is_fake_job()
+    db_path = (
+        os.environ.get("CONSOLE_RATE_LIMIT_DB_PATH", "limits.console.db")
+        if console
+        else os.environ.get("RATE_LIMIT_DB_PATH", "limits.db")
     )
+    limiter = RateLimiter(db_path, config=config)
 
     await ctx.connect()
 
     participant = await _wait_for_caller(ctx)
-    caller_id = _caller_id_from(participant)
-    call_id = ctx.room.name or f"call-{uuid.uuid4().hex[:12]}"
+    # In console the "participant" is a MagicMock — don't try to read a number off it.
+    caller_id = CONSOLE_CALLER_ID if console else _caller_id_from(participant)
+    call_id = _first_string(getattr(ctx.room, "name", None)) or f"call-{uuid.uuid4().hex[:12]}"
+    if console:
+        call_id = f"console-{uuid.uuid4().hex[:8]}"
     ctx.log_context_fields = {"call_id": call_id, "caller_id": caller_id}
 
-    # Layers 1 and 2: decide BEFORE building the pipeline.
+    # Layers 1 and 2: decide BEFORE building the pipeline. Console skips enforcement so
+    # repeated local testing isn't blocked on the 4th run — set CONSOLE_ENFORCE_LIMITS=1
+    # when you specifically want to exercise the over-limit hangup path.
+    enforce = not console or _env_flag("CONSOLE_ENFORCE_LIMITS")
     decision = limiter.check(caller_id)
-    if not decision.allowed:
+    if not decision.allowed and not enforce:
+        logger.warning(
+            "console: rate limit %s would have rejected this call; continuing anyway",
+            decision.reason,
+        )
+    elif not decision.allowed:
         logger.info("call from %s rejected: %s", caller_id, decision.reason)
         try:
             await _turn_away(ctx, decision.message or "", language)

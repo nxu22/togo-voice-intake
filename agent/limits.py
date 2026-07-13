@@ -33,6 +33,18 @@ PER_CALLER_LIMIT_MESSAGE = (
 UNKNOWN_CALLER = "unknown"
 
 
+def normalize_caller_id(caller_id: object) -> str:
+    """Coerce a caller ID into something SQLite can actually bind.
+
+    Console mode hands us an autospec MagicMock whose attributes are truthy mocks,
+    so "is it set?" is not the same question as "is it a usable string?". Anything
+    that isn't a non-empty string becomes UNKNOWN_CALLER rather than reaching the DB.
+    """
+    if isinstance(caller_id, str) and caller_id.strip():
+        return caller_id.strip()
+    return UNKNOWN_CALLER
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     return int(raw) if raw else default
@@ -142,12 +154,12 @@ class RateLimiter:
         """The current local day key. Rolls over at midnight in the configured tz."""
         return self._now().astimezone(self._tz).date().isoformat()
 
-    def check(self, caller_id: str | None) -> Decision:
+    def check(self, caller_id: object) -> Decision:
         """Decide whether to run the full pipeline for an incoming call.
 
         Must be called BEFORE the STT/LLM/TTS pipeline starts.
         """
-        caller_id = caller_id or UNKNOWN_CALLER
+        caller_id = normalize_caller_id(caller_id)
         day = self.today()
         stats = self.daily_stats(day)
 
@@ -168,23 +180,23 @@ class RateLimiter:
         minutes = self._minutes(day)
         return minutes * self.config.cost_per_minute_usd
 
-    def calls_by_caller(self, caller_id: str, day: str | None = None) -> int:
+    def calls_by_caller(self, caller_id: object, day: str | None = None) -> int:
         day = day or self.today()
         row = self._db.execute(
             "SELECT COUNT(*) AS n FROM calls WHERE day = ? AND caller_id = ?",
-            (day, caller_id),
+            (day, normalize_caller_id(caller_id)),
         ).fetchone()
         return int(row["n"])
 
-    def start_call(self, call_id: str, caller_id: str | None) -> None:
+    def start_call(self, call_id: str, caller_id: object) -> None:
         """Record a call as started. Counts against the daily cap immediately."""
         now = self._now()
         self._db.execute(
             "INSERT OR REPLACE INTO calls (call_id, caller_id, day, started_at) "
             "VALUES (?, ?, ?, ?)",
             (
-                call_id,
-                caller_id or UNKNOWN_CALLER,
+                str(call_id),
+                normalize_caller_id(caller_id),
                 now.astimezone(self._tz).date().isoformat(),
                 now.isoformat(),
             ),
