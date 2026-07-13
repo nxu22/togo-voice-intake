@@ -148,6 +148,13 @@ async def main() -> int:
             f"(end_reason={state.end_reason!r})"
         )
 
+    # The caller must never hear the agent narrate its own plumbing.
+    NARRATION = ("i'll end the call", "ending the call", "end the call now",
+                 "let me record", "i'll note that down in the system", "using the")
+    narrated = [line for line in agent_lines if any(n in line.lower() for n in NARRATION)]
+    if narrated:
+        failures.append(f"agent narrated a tool out loud: {narrated!r}")
+
     print("\033[1m--- captured lead ---\033[0m")
     print(json.dumps(lead.to_dict(), indent=2))
     print(f"\nmessages for follow-up: {lead.messages}")

@@ -23,6 +23,8 @@ from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentSession,
+    AgentStateChangedEvent,
+    APIConnectOptions,
     ConversationItemAddedEvent,
     EndpointingOptions,
     InterruptionOptions,
@@ -34,6 +36,8 @@ from livekit.agents import (
     cli,
     llm,
 )
+from livekit.agents.inference.eot import TurnDetector
+from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.plugins import anthropic, cartesia, deepgram, silero
 
 from agent.limits import UNKNOWN_CALLER, LimitConfig, RateLimiter
@@ -52,12 +56,35 @@ logger = logging.getLogger("togo.agent")
 
 # Silence the caller must leave before we consider their turn finished.
 MIN_ENDPOINTING_DELAY = 0.8  # seconds
-# Ceiling on the wait when the turn detector is UNSURE the caller has finished.
-# This is not a rare path: the end-of-turn model scored the complete sentence
-# "can I call you again? I wanna end the call" at only 0.43, so false negatives are
-# routine — and every one of them costs the caller this much silence. On a phone call
-# anything past ~2s reads as a dead line, so we reply on a low score rather than wait.
-MAX_ENDPOINTING_DELAY = 2.0  # seconds
+
+# The endpointing delay is BINARY, not graduated (audio_recognition.py): the wait is
+# min_delay, unless end-of-turn probability < unlikely_threshold, in which case it is
+# max_delay. So both of these landed in the same bucket:
+#   "can I call you again? I wanna end the call" -> 0.43  (complete sentence, but UNSURE)
+#   a caller still mid-thought                   -> 0.17  (genuinely unfinished)
+# Moving max_delay alone can only trade one complaint for the other. The fix is to move
+# the threshold BETWEEN them, so a complete-sounding sentence commits fast while a
+# genuinely unfinished one is given real room to breathe.
+EOU_UNLIKELY_THRESHOLD = 0.35
+# Only pays out on a genuinely-unsure turn (<0.35) now, so we can afford to be patient.
+MAX_ENDPOINTING_DELAY = 3.0  # seconds
+
+# LLM connect options. livekit defaults to timeout=10s / retry_interval=2s, so ONE
+# stalled request buys 12s+ of dead air before a retry is even attempted — the likely
+# source of the 16.5s silence. Steady-state TTFT is ~700ms, so 6s is already a very
+# generous ceiling, and we retry almost immediately.
+LLM_TIMEOUT_SECONDS = 6.0
+LLM_MAX_RETRY = 2
+LLM_RETRY_INTERVAL = 0.2  # seconds
+
+# If generation outlives this, say something so the caller knows the line is alive.
+# The dead air that made a caller ask "Hello? Can you hear me?" is worse than a filler.
+THINKING_FILLER_DELAY = 1.8  # seconds
+THINKING_FILLERS = (
+    "Got it — one moment.",
+    "Okay, let me get that down.",
+    "Right, just a second.",
+)
 
 # Preemptive generation (livekit default: ON). We keep it on deliberately: it starts
 # the LLM before the turn is committed, which hides most of the ~700ms TTFT.
@@ -304,7 +331,17 @@ async def entrypoint(ctx: JobContext) -> None:
             **({"voice": language.voice_id()} if language.voice_id() else {}),
         ),
         vad=vad,
+        conn_options=SessionConnectOptions(
+            llm_conn_options=APIConnectOptions(
+                timeout=LLM_TIMEOUT_SECONDS,
+                max_retry=LLM_MAX_RETRY,
+                retry_interval=LLM_RETRY_INTERVAL,
+            ),
+        ),
         turn_handling=TurnHandlingOptions(
+            # Server defaults are calibrated, so overriding logs a warning — but the
+            # calibration is wrong for us: it scored a complete sentence at 0.43.
+            turn_detection=TurnDetector(unlikely_threshold=EOU_UNLIKELY_THRESHOLD),
             endpointing=EndpointingOptions(
                 min_delay=MIN_ENDPOINTING_DELAY,
                 max_delay=MAX_ENDPOINTING_DELAY,
@@ -326,6 +363,33 @@ async def entrypoint(ctx: JobContext) -> None:
         item = event.item
         if getattr(item, "role", None) in ("user", "assistant"):
             state.add_transcript(item.role, item.text_content or "")
+
+    # Dead-air guard. A stalled LLM request (or a slow tool + long readback) left a
+    # caller listening to silence long enough to ask "Hello? Can you hear me?" three
+    # times. If we're still generating after THINKING_FILLER_DELAY, say so.
+    filler_state: dict[str, object] = {"task": None, "index": 0}
+
+    async def _speak_filler() -> None:
+        try:
+            await asyncio.sleep(THINKING_FILLER_DELAY)
+        except asyncio.CancelledError:
+            return  # generation finished in time — the common case
+        index = int(filler_state["index"])
+        filler_state["index"] = index + 1
+        line = THINKING_FILLERS[index % len(THINKING_FILLERS)]
+        logger.info("generation exceeded %ss; speaking filler", THINKING_FILLER_DELAY)
+        # Not added to the chat context: it's a UX noise-floor, not something the agent
+        # should later believe it "said" and reason about.
+        session.say(line, add_to_chat_ctx=False)
+
+    @session.on("agent_state_changed")
+    def _on_agent_state(event: AgentStateChangedEvent) -> None:
+        task = filler_state["task"]
+        if isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
+            filler_state["task"] = None
+        if event.new_state == "thinking":
+            filler_state["task"] = asyncio.create_task(_speak_filler())
 
     async def _on_shutdown() -> None:
         state.ended_at = datetime.now(timezone.utc)

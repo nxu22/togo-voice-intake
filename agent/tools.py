@@ -177,7 +177,10 @@ async def end_call(context: RunContext[CallState]) -> str:
 
     Call this ONLY after you have already spoken your closing line — the goodbye is
     allowed to finish playing before the line drops, so say goodbye first, then call
-    this in the same turn. Do not call it mid-conversation, and do not announce it.
+    this in the same turn. Do not call it mid-conversation.
+
+    Say NOTHING when you call this. Your closing line is the last thing the caller
+    hears. Do not announce the hangup ("Now I'll end the call") — just call the tool.
 
     Call it after: the readback is confirmed and you've closed; the caller declines to
     give contact info and you've thanked them; the caller is abusive or a prank; or
