@@ -23,7 +23,10 @@ MAX_TOLERABLE_SILENCE_SECONDS = 2.0
 
 
 def _session() -> AgentSession:
-    """Build the session exactly as main.py does."""
+    """Build the session exactly as main.py does.
+
+    Callers must be async: AgentSession grabs the running event loop at construction.
+    """
     return AgentSession(
         turn_handling=TurnHandlingOptions(
             endpointing=EndpointingOptions(
@@ -41,7 +44,7 @@ def _session() -> AgentSession:
     )
 
 
-def test_unsure_turn_detector_never_leaves_a_long_dead_line():
+async def test_unsure_turn_detector_never_leaves_a_long_dead_line():
     """max_delay is the wait when the end-of-turn model is UNSURE.
 
     That path is common, not rare — the model scored the complete sentence
@@ -51,12 +54,12 @@ def test_unsure_turn_detector_never_leaves_a_long_dead_line():
     assert endpointing["max_delay"] <= MAX_TOLERABLE_SILENCE_SECONDS
 
 
-def test_endpointing_floor_is_below_the_ceiling():
+async def test_endpointing_floor_is_below_the_ceiling():
     endpointing = _session().options.turn_handling["endpointing"]
     assert endpointing["min_delay"] < endpointing["max_delay"]
 
 
-def test_preemptive_generation_is_set_explicitly_not_inherited():
+async def test_preemptive_generation_is_set_explicitly_not_inherited():
     """It defaults to ON upstream. Whatever we want, we must say so out loud."""
     assert _session().options.preemptive_generation["enabled"] is main.PREEMPTIVE_GENERATION
 
