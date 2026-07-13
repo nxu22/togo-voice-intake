@@ -46,7 +46,24 @@ pytest
 ```
 
 Covers the rate-limit logic (including the midnight reset and the $10/day spend math),
-the lead payload shape, and webhook retry + disk fallback. No network calls, no API keys.
+the lead payload shape, webhook retry + disk fallback, and caller-ID handling in console
+mode. No network calls, no API keys.
+
+### Simulate a whole call without a microphone
+
+```bash
+python scripts/simulate_call.py          # print the captured lead + payload
+python scripts/simulate_call.py --post    # also POST it to N8N_WEBHOOK_URL
+```
+
+Plays a scripted business owner through all seven questions against the real Claude
+model and the real tools — no STT, no TTS, no audio. It checks that the seven questions
+are asked, that `capture_lead` accumulates them, that the planted pricing question is
+deflected into `take_message` rather than answered, and that the readback happens before
+the goodbye. Costs a few cents of Anthropic usage.
+
+This is the fastest way to check a prompt change didn't break the script. It cannot tell
+you how the turn-taking *feels* — only a real console call can.
 
 ## How a call flows
 
