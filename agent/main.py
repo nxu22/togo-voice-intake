@@ -27,9 +27,11 @@ from livekit.agents import (
     EndpointingOptions,
     InterruptionOptions,
     JobContext,
+    JobProcess,
     TurnHandlingOptions,
     WorkerOptions,
     cli,
+    llm,
 )
 from livekit.plugins import anthropic, cartesia, deepgram, silero
 
@@ -70,6 +72,12 @@ MIN_INTERRUPTION_WORDS = 2
 LLM_TEMPERATURE = 0.2
 LLM_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 
+# The Anthropic plugin defaults to strict tool schemas, which cost a schema-compilation
+# round trip and measured ~2x the time-to-first-token on our tools (p50 1730ms -> 897ms).
+# Our tools take plain optional strings and tolerate junk (see _clean in tools.py), so we
+# don't need the strictness — on a phone call, latency is the feature.
+LLM_STRICT_TOOL_SCHEMA = False
+
 # How long to wait for the SIP participant before assuming we're in console mode.
 PARTICIPANT_WAIT_SECONDS = 5.0
 
@@ -86,6 +94,44 @@ WRAPUP_INSTRUCTIONS = (
     "you must not end without. Then read back what you have recorded, confirm it, "
     "and close politely. Keep it brief."
 )
+
+
+def prewarm(proc: JobProcess) -> None:
+    """Do the expensive, per-process work before a call arrives, not during one.
+
+    Silero's ONNX model was previously loaded inside the entrypoint, i.e. on every
+    single call while the caller waited. It only needs loading once per process.
+    """
+    proc.userdata["vad"] = silero.VAD.load(
+        min_speech_duration=VAD_MIN_SPEECH_DURATION,
+        min_silence_duration=VAD_MIN_SILENCE_DURATION,
+        activation_threshold=VAD_ACTIVATION_THRESHOLD,
+    )
+    proc.userdata["llm"] = anthropic.LLM(
+        model=LLM_MODEL,
+        temperature=LLM_TEMPERATURE,
+        _strict_tool_schema=LLM_STRICT_TOOL_SCHEMA,
+    )
+    logger.info("prewarm complete: VAD loaded, LLM client ready")
+
+
+async def _warm_llm_connection(model: anthropic.LLM) -> None:
+    """Pay the TLS/connection setup before the caller is waiting on it.
+
+    The first request on a fresh connection measured several seconds slower than
+    subsequent ones. Run this concurrently with waiting for the caller so the
+    handshake is already done by the time we generate the greeting.
+    """
+    try:
+        chat_ctx = llm.ChatContext.empty()
+        chat_ctx.add_message(role="user", content="hi")
+        stream = model.chat(chat_ctx=chat_ctx)
+        async for _ in stream:
+            break
+        await stream.aclose()
+        logger.info("LLM connection warmed")
+    except Exception as exc:  # noqa: BLE001 — a cold connection is not worth failing a call
+        logger.warning("LLM warm-up failed (harmless): %s", exc)
 
 
 def _env_flag(name: str) -> bool:
@@ -186,6 +232,21 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await ctx.connect()
 
+    # Reuse the prewarmed VAD/LLM if this process has them; fall back for safety.
+    llm_model: anthropic.LLM = ctx.proc.userdata.get("llm") or anthropic.LLM(
+        model=LLM_MODEL,
+        temperature=LLM_TEMPERATURE,
+        _strict_tool_schema=LLM_STRICT_TOOL_SCHEMA,
+    )
+    vad = ctx.proc.userdata.get("vad") or silero.VAD.load(
+        min_speech_duration=VAD_MIN_SPEECH_DURATION,
+        min_silence_duration=VAD_MIN_SILENCE_DURATION,
+        activation_threshold=VAD_ACTIVATION_THRESHOLD,
+    )
+
+    # Warm the TLS connection while the caller is still connecting — free latency.
+    warm_task = asyncio.create_task(_warm_llm_connection(llm_model))
+
     participant = await _wait_for_caller(ctx)
     # In console the "participant" is a MagicMock — don't try to read a number off it.
     caller_id = CONSOLE_CALLER_ID if console else _caller_id_from(participant)
@@ -224,17 +285,13 @@ async def entrypoint(ctx: JobContext) -> None:
             language=language.stt_language,
             endpointing_ms=STT_ENDPOINTING_MS,
         ),
-        llm=anthropic.LLM(model=LLM_MODEL, temperature=LLM_TEMPERATURE),
+        llm=llm_model,
         tts=cartesia.TTS(
             model=os.environ.get("CARTESIA_MODEL", "sonic-3"),
             language=language.tts_language,
             **({"voice": language.voice_id()} if language.voice_id() else {}),
         ),
-        vad=silero.VAD.load(
-            min_speech_duration=VAD_MIN_SPEECH_DURATION,
-            min_silence_duration=VAD_MIN_SILENCE_DURATION,
-            activation_threshold=VAD_ACTIVATION_THRESHOLD,
-        ),
+        vad=vad,
         turn_handling=TurnHandlingOptions(
             endpointing=EndpointingOptions(
                 min_delay=MIN_ENDPOINTING_DELAY,
@@ -306,6 +363,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     limit_task = asyncio.create_task(_enforce_time_limit())
     ctx.add_shutdown_callback(lambda: _cancel(limit_task))
+    ctx.add_shutdown_callback(lambda: _cancel(warm_task))
 
     await session.generate_reply(
         instructions="Greet the caller with your opening line and ask if it's a good time."
@@ -321,4 +379,4 @@ async def _cancel(task: asyncio.Task[None]) -> None:
 
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
