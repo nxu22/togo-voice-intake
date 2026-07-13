@@ -28,6 +28,7 @@ from livekit.agents import (
     InterruptionOptions,
     JobContext,
     JobProcess,
+    PreemptiveGenerationOptions,
     TurnHandlingOptions,
     WorkerOptions,
     cli,
@@ -51,8 +52,19 @@ logger = logging.getLogger("togo.agent")
 
 # Silence the caller must leave before we consider their turn finished.
 MIN_ENDPOINTING_DELAY = 0.8  # seconds
-# Hard ceiling on how long we wait for the turn detector before replying anyway.
-MAX_ENDPOINTING_DELAY = 6.0  # seconds
+# Ceiling on the wait when the turn detector is UNSURE the caller has finished.
+# This is not a rare path: the end-of-turn model scored the complete sentence
+# "can I call you again? I wanna end the call" at only 0.43, so false negatives are
+# routine — and every one of them costs the caller this much silence. On a phone call
+# anything past ~2s reads as a dead line, so we reply on a low score rather than wait.
+MAX_ENDPOINTING_DELAY = 2.0  # seconds
+
+# Preemptive generation (livekit default: ON). We keep it on deliberately: it starts
+# the LLM before the turn is committed, which hides most of the ~700ms TTFT.
+# It is safe with our tools — livekit gates tool execution behind speech authorization
+# (agent_activity.py: "start to execute tools (only after play())"), so a speculative
+# turn that gets discarded never runs capture_lead and cannot corrupt a lead.
+PREEMPTIVE_GENERATION = True
 
 # Silero VAD: how much silence marks the end of speech. Generous, so that a caller
 # pausing to think ("uh... let me see...") is not treated as done talking.
@@ -300,6 +312,11 @@ async def entrypoint(ctx: JobContext) -> None:
             interruption=InterruptionOptions(
                 min_duration=MIN_INTERRUPTION_DURATION,
                 min_words=MIN_INTERRUPTION_WORDS,
+            ),
+            # Set explicitly rather than inherited — livekit defaults this to enabled,
+            # so leaving it out is a decision either way. See PREEMPTIVE_GENERATION.
+            preemptive_generation=PreemptiveGenerationOptions(
+                enabled=PREEMPTIVE_GENERATION
             ),
         ),
     )
