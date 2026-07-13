@@ -68,6 +68,9 @@ class CallState:
     # Overwritten by end_call / the time-limit path. Stays "caller_hangup" if the
     # caller simply drops, which is the only way a call ends without us ending it.
     end_reason: str = "caller_hangup"
+    # True while the caller is mid-sentence and we are deliberately holding the line.
+    # Read by the dead-air filler, which must stay quiet during a thinking pause.
+    awaiting_continuation: bool = False
 
     def duration_seconds(self) -> float:
         end = self.ended_at or datetime.now(timezone.utc)

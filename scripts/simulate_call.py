@@ -25,13 +25,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
-from livekit.agents import Agent, AgentSession, ConversationItemAddedEvent
+from livekit.agents import AgentSession, ConversationItemAddedEvent, StopResponse
+from livekit.agents import llm as lkllm
 from livekit.plugins import anthropic
 
 from agent.limits import LimitConfig, RateLimiter
 from agent.main import LLM_MODEL, LLM_TEMPERATURE
 from agent.postcall import build_payload, deliver
 from agent.prompts import get_language
+from agent.main import IntakeAgent
 from agent.tools import CallState, capture_lead, end_call, take_message
 
 load_dotenv()
@@ -40,7 +42,10 @@ load_dotenv()
 # to prove take_message fires and that the agent refuses to answer it.
 CALLER_TURNS = [
     "Yeah, sounds good.",
-    "Sure — I run a bakery, Sunrise Bakery, over on Corydon.",
+    # The utterance the end-of-turn model scored 0.96 (confidently "finished"). The
+    # agent must say NOTHING here and wait for the caller to find the name.
+    ("The company's name is", False),
+    "Sunrise Bakery — we're a bakery over on Corydon.",
     "Honestly? Taking phone orders. It eats my whole morning.",
     "Right now we just scribble them on a notepad by the register.",
     "Every single day. All day, really.",
@@ -83,12 +88,11 @@ async def main() -> int:
         if getattr(item, "role", None) in ("user", "assistant"):
             state.add_transcript(item.role, item.text_content or "")
 
-    await session.start(
-        Agent(
-            instructions=language.system_prompt(),
-            tools=[capture_lead, take_message, end_call],
-        )
+    intake = IntakeAgent(
+        instructions=language.system_prompt(),
+        tools=[capture_lead, take_message, end_call],
     )
+    await session.start(intake)
 
     _say("sys", f"model={LLM_MODEL} temperature={LLM_TEMPERATURE}")
     print()
@@ -101,21 +105,50 @@ async def main() -> int:
             _say("agent", text)
 
     agent_lines: list[str] = []
+    silence_failures: list[str] = []
     for turn in CALLER_TURNS:
-        _say("caller", turn)
-        result = await session.run(user_input=turn)
-        for event in result.events:
-            item = getattr(event, "item", None)
-            text = getattr(item, "text_content", None)
-            if text and getattr(item, "role", None) == "assistant":
-                agent_lines.append(text)
-                _say("agent", text)
+        text_in, expect_reply = turn if isinstance(turn, tuple) else (turn, True)
+        _say("caller", text_in)
+
+        # session.run() calls generate_reply() directly and never reaches the audio
+        # path's on_user_turn_completed hook, so drive it ourselves — otherwise the
+        # simulation silently skips the very gate we are testing.
+        pending = lkllm.ChatContext.empty().add_message(role="user", content=text_in)
+        try:
+            await intake.on_user_turn_completed(session.history, pending)
+        except StopResponse:
+            if expect_reply:
+                silence_failures.append(f"agent went mute on a complete answer: {text_in!r}")
+            else:
+                _say("sys", "(silence — held the line, as intended)")
+            print()
+            continue
+
+        # The hook may have stitched a held-back fragment onto this turn.
+        result = await session.run(user_input=pending.text_content or text_in)
+
+        replies = [
+            t
+            for e in result.events
+            if (item := getattr(e, "item", None)) is not None
+            and getattr(item, "role", None) == "assistant"
+            and (t := getattr(item, "text_content", None))
+        ]
+        for text in replies:
+            agent_lines.append(text)
+            _say("agent", text)
+
+        if not expect_reply and replies:
+            silence_failures.append(
+                f"agent talked over a caller who was mid-sentence "
+                f"({text_in!r}): {replies!r}"
+            )
         print()
 
     # --- assertions ---------------------------------------------------------
     lead = state.lead
     joined = " ".join(agent_lines).lower()
-    failures: list[str] = []
+    failures: list[str] = list(silence_failures)
 
     if not lead.is_complete():
         missing = [k for k, v in lead.to_dict().items() if not v and k != "contact"]

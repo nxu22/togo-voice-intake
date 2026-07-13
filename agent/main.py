@@ -31,6 +31,7 @@ from livekit.agents import (
     JobContext,
     JobProcess,
     PreemptiveGenerationOptions,
+    StopResponse,
     TurnHandlingOptions,
     WorkerOptions,
     cli,
@@ -44,6 +45,7 @@ from agent.limits import UNKNOWN_CALLER, LimitConfig, RateLimiter
 from agent.postcall import build_payload, deliver
 from agent.prompts import get_language
 from agent.tools import CallState, capture_lead, end_call, take_message
+from agent.turns import looks_unfinished
 
 load_dotenv()
 
@@ -79,11 +81,24 @@ LLM_RETRY_INTERVAL = 0.2  # seconds
 
 # If generation outlives this, say something so the caller knows the line is alive.
 # The dead air that made a caller ask "Hello? Can you hear me?" is worse than a filler.
+# Suppressed while the caller is mid-sentence — see IntakeAgent.
 THINKING_FILLER_DELAY = 1.8  # seconds
 THINKING_FILLERS = (
     "Got it — one moment.",
     "Okay, let me get that down.",
     "Right, just a second.",
+)
+
+# How long a caller may sit in silence mid-sentence before we check in. A caller
+# thinking of their company name took ~4s, and heard two interjections in that time.
+# Nothing at all should happen inside that window.
+DANGLING_NUDGE_SECONDS = 7.0
+# Don't hold the line forever if the heuristic keeps mis-firing on the same caller.
+MAX_CONSECUTIVE_HOLDS = 2
+NUDGE_INSTRUCTIONS = (
+    "The caller started an answer, trailed off mid-sentence, and has now been silent "
+    "for several seconds. In one short, warm sentence, invite them to finish the "
+    "thought. Do not repeat the question and do not rush them."
 )
 
 # Preemptive generation (livekit default: ON). We keep it on deliberately: it starts
@@ -133,6 +148,64 @@ WRAPUP_INSTRUCTIONS = (
     "you must not end without. Then read back what you have recorded, confirm it, "
     "and close politely. Keep it brief."
 )
+
+
+class IntakeAgent(Agent):
+    """The intake agent, plus one rule the turn detector can't express: don't talk over
+    a caller who is still thinking.
+
+    The end-of-turn model scored "The company's name is" at 0.96 — confidently finished.
+    When the words say otherwise, we discard the turn and keep listening rather than
+    interjecting "I'm listening — go ahead" at someone mid-thought.
+    """
+
+    def __init__(self, *, instructions: str, tools: list) -> None:
+        super().__init__(instructions=instructions, tools=tools)
+        self._fragment: str = ""
+        self._nudge_task: asyncio.Task[None] | None = None
+        self._consecutive_holds = 0
+
+    def _cancel_nudge(self) -> None:
+        if self._nudge_task and not self._nudge_task.done():
+            self._nudge_task.cancel()
+        self._nudge_task = None
+
+    async def _nudge_later(self) -> None:
+        """If the caller genuinely goes quiet mid-sentence, check in — but not before
+        we've given them real room to think. The complaint was an interjection at 0.8s;
+        a caller thinking for 4s should hear nothing at all."""
+        try:
+            await asyncio.sleep(DANGLING_NUDGE_SECONDS)
+        except asyncio.CancelledError:
+            return  # they carried on — the common case
+        logger.info("caller trailed off and stayed quiet; nudging gently")
+        self.session.generate_reply(instructions=NUDGE_INSTRUCTIONS)
+
+    async def on_user_turn_completed(
+        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
+    ) -> None:
+        self._cancel_nudge()
+        state: CallState = self.session.userdata
+
+        text = (new_message.text_content or "").strip()
+
+        # Stitch a held-back fragment onto what they just said, so nothing is lost:
+        # "The company's name is" + "Sunrise Bakery" -> one coherent answer.
+        if self._fragment:
+            text = f"{self._fragment} {text}".strip()
+            new_message.content = [text]
+            self._fragment = ""
+
+        if looks_unfinished(text) and self._consecutive_holds < MAX_CONSECUTIVE_HOLDS:
+            self._consecutive_holds += 1
+            self._fragment = text
+            state.awaiting_continuation = True
+            logger.info("caller seems mid-sentence, holding the line: %r", text)
+            self._nudge_task = asyncio.create_task(self._nudge_later())
+            raise StopResponse()
+
+        self._consecutive_holds = 0
+        state.awaiting_continuation = False
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -374,6 +447,12 @@ async def entrypoint(ctx: JobContext) -> None:
             await asyncio.sleep(THINKING_FILLER_DELAY)
         except asyncio.CancelledError:
             return  # generation finished in time — the common case
+        # Never fill a thinking pause. Preemptive generation can put us in "thinking"
+        # on a turn we are about to discard, and speaking here would just recreate the
+        # interruption we removed — a filler on top of a caller mid-sentence.
+        if state.awaiting_continuation:
+            logger.debug("suppressing filler: caller is mid-sentence")
+            return
         index = int(filler_state["index"])
         filler_state["index"] = index + 1
         line = THINKING_FILLERS[index % len(THINKING_FILLERS)]
@@ -417,7 +496,7 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(_on_shutdown)
 
     await session.start(
-        Agent(
+        IntakeAgent(
             instructions=language.system_prompt(),
             tools=[capture_lead, take_message, end_call],
         ),
