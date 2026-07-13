@@ -32,7 +32,7 @@ from agent.limits import LimitConfig, RateLimiter
 from agent.main import LLM_MODEL, LLM_TEMPERATURE
 from agent.postcall import build_payload, deliver
 from agent.prompts import get_language
-from agent.tools import CallState, capture_lead, take_message
+from agent.tools import CallState, capture_lead, end_call, take_message
 
 load_dotenv()
 
@@ -84,7 +84,10 @@ async def main() -> int:
             state.add_transcript(item.role, item.text_content or "")
 
     await session.start(
-        Agent(instructions=language.system_prompt(), tools=[capture_lead, take_message])
+        Agent(
+            instructions=language.system_prompt(),
+            tools=[capture_lead, take_message, end_call],
+        )
     )
 
     _say("sys", f"model={LLM_MODEL} temperature={LLM_TEMPERATURE}")
@@ -137,6 +140,14 @@ async def main() -> int:
     elif goodbye_at is not None and goodbye_at < readback_at:
         failures.append("agent said goodbye BEFORE the readback (Riverstone regression)")
 
+    # The call stays open until the agent hangs up. If it never called end_call, a real
+    # caller would be sitting on an open line listening to silence.
+    if state.end_reason != "agent_goodbye":
+        failures.append(
+            f"agent never called end_call — the line would stay open "
+            f"(end_reason={state.end_reason!r})"
+        )
+
     print("\033[1m--- captured lead ---\033[0m")
     print(json.dumps(lead.to_dict(), indent=2))
     print(f"\nmessages for follow-up: {lead.messages}")
@@ -148,7 +159,10 @@ async def main() -> int:
         if lead.is_complete():
             limiter.mark_lead_captured(state.call_id)
         payload = build_payload(
-            state, limiter.daily_stats(), completed=lead.is_complete(), end_reason="simulation"
+            state,
+            limiter.daily_stats(),
+            completed=lead.is_complete(),
+            end_reason=state.end_reason,
         )
 
     print("\n\033[1m--- webhook payload ---\033[0m")

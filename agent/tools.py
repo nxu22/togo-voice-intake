@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from livekit.agents import RunContext, function_tool
+from livekit.agents import RunContext, function_tool, get_job_context
 
 logger = logging.getLogger("togo.tools")
 
@@ -65,6 +65,9 @@ class CallState:
     lead: Lead = field(default_factory=Lead)
     transcript: list[dict[str, str]] = field(default_factory=list)
     ended_at: datetime | None = None
+    # Overwritten by end_call / the time-limit path. Stays "caller_hangup" if the
+    # caller simply drops, which is the only way a call ends without us ending it.
+    end_reason: str = "caller_hangup"
 
     def duration_seconds(self) -> float:
         end = self.ended_at or datetime.now(timezone.utc)
@@ -166,3 +169,43 @@ async def take_message(context: RunContext[CallState], message: str) -> str:
     context.userdata.lead.messages.append(text)
     logger.info("take_message recorded message #%d", len(context.userdata.lead.messages))
     return "Noted — a human will follow up on that."
+
+
+@function_tool
+async def end_call(context: RunContext[CallState]) -> str:
+    """Hang up the phone. The call stays open until you call this.
+
+    Call this ONLY after you have already spoken your closing line — the goodbye is
+    allowed to finish playing before the line drops, so say goodbye first, then call
+    this in the same turn. Do not call it mid-conversation, and do not announce it.
+
+    Call it after: the readback is confirmed and you've closed; the caller declines to
+    give contact info and you've thanked them; the caller is abusive or a prank; or
+    audio is unintelligible and you've pointed them at the website.
+    """
+    state = context.userdata
+    state.end_reason = "agent_goodbye"
+    logger.info(
+        "end_call: hanging up (lead_complete=%s, messages=%d)",
+        state.lead.is_complete(),
+        len(state.lead.messages),
+    )
+
+    # Let the goodbye finish playing. Cutting it off here is exactly the abrupt hangup
+    # the readback rule exists to prevent.
+    await context.wait_for_playout()
+
+    job_ctx = get_job_context(required=False)
+    if job_ctx is None:
+        # Text simulation — there is no room and no job to tear down.
+        return "Call ended."
+
+    try:
+        # Real SIP call: this disconnects the caller. In console mode it no-ops.
+        await job_ctx.delete_room()
+    except Exception as exc:  # noqa: BLE001 — a failed hangup must not raise at the caller
+        logger.warning("delete_room failed during end_call: %s", exc)
+
+    # Ends the job (and so the console session) and fires the post-call webhook.
+    job_ctx.shutdown(reason="agent ended the call")
+    return "Call ended."

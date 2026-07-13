@@ -36,7 +36,7 @@ from livekit.plugins import anthropic, cartesia, deepgram, silero
 from agent.limits import UNKNOWN_CALLER, LimitConfig, RateLimiter
 from agent.postcall import build_payload, deliver
 from agent.prompts import get_language
-from agent.tools import CallState, capture_lead, take_message
+from agent.tools import CallState, capture_lead, end_call, take_message
 
 load_dotenv()
 
@@ -140,11 +140,18 @@ async def _wait_for_caller(ctx: JobContext) -> rtc.RemoteParticipant | None:
         return None
 
 
-async def _hangup(ctx: JobContext) -> None:
+async def _hangup(ctx: JobContext, reason: str) -> None:
+    """Drop the line and end the job.
+
+    delete_room() disconnects a real SIP caller but deliberately no-ops in console
+    mode, so shutdown() is what actually ends the session — without it a console
+    call would keep listening forever after the goodbye.
+    """
     try:
         await ctx.delete_room()
     except Exception as exc:  # noqa: BLE001 — hangup must never raise into the caller
         logger.warning("failed to delete room on hangup: %s", exc)
+    ctx.shutdown(reason=reason)
 
 
 async def _turn_away(ctx: JobContext, message: str, language) -> None:
@@ -160,7 +167,7 @@ async def _turn_away(ctx: JobContext, message: str, language) -> None:
     handle = session.say(message, allow_interruptions=False)
     await handle.wait_for_playout()
     await session.aclose()
-    await _hangup(ctx)
+    await _hangup(ctx, reason="rate limited")
 
 
 async def entrypoint(ctx: JobContext) -> None:
@@ -246,8 +253,6 @@ async def entrypoint(ctx: JobContext) -> None:
         if getattr(item, "role", None) in ("user", "assistant"):
             state.add_transcript(item.role, item.text_content or "")
 
-    end_reason = "caller_hangup"
-
     async def _on_shutdown() -> None:
         state.ended_at = datetime.now(timezone.utc)
         limiter.end_call(call_id, state.duration_seconds())
@@ -264,7 +269,7 @@ async def entrypoint(ctx: JobContext) -> None:
             state,
             limiter.daily_stats(),
             completed=state.lead.is_complete(),
-            end_reason=end_reason,
+            end_reason=state.end_reason,
         )
         try:
             await deliver(payload)
@@ -274,17 +279,19 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(_on_shutdown)
 
     await session.start(
-        Agent(instructions=language.system_prompt(), tools=[capture_lead, take_message]),
+        Agent(
+            instructions=language.system_prompt(),
+            tools=[capture_lead, take_message, end_call],
+        ),
         room=ctx.room,
     )
 
     # Layer 3: force a readback + goodbye before the hard limit, then hang up.
     async def _enforce_time_limit() -> None:
-        nonlocal end_reason
         wrapup_at = max(30, config.max_call_seconds - WRAPUP_MARGIN_SECONDS)
         await asyncio.sleep(wrapup_at)
         logger.info("call %s hit the wrap-up threshold; forcing readback", call_id)
-        end_reason = "time_limit"
+        state.end_reason = "time_limit"
         try:
             handle = session.generate_reply(instructions=WRAPUP_INSTRUCTIONS)
             await asyncio.wait_for(
@@ -295,7 +302,7 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.warning("forced wrap-up did not finish in time; hanging up anyway")
         except Exception as exc:  # noqa: BLE001
             logger.warning("forced wrap-up failed: %s", exc)
-        await _hangup(ctx)
+        await _hangup(ctx, reason="call time limit reached")
 
     limit_task = asyncio.create_task(_enforce_time_limit())
     ctx.add_shutdown_callback(lambda: _cancel(limit_task))
