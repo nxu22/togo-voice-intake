@@ -98,16 +98,45 @@ togo-voice-intake/
 - No browser/WebRTC widget yet (roadmap v2 — same worker will serve it)
 - No outbound calling
 
-## Definition of done (Phase 1)
+## Definition of done (Phase 1) — ✅ DONE, verified 2026-07-14
 
 Human runs console mode, completes a full 7-question call as a fake business owner,
 hears an accurate readback, hangs up, and within seconds the n8n webhook receives a
 correctly shaped payload. `pytest` passes. Rate-limit logic unit-tested including the
 midnight reset and the $10 estimate math.
 
+Verified end-to-end with a real voice call: full intake, accurate readback, agent
+hangs up on its own, Airtable row lands with Completed checked, notification email
+renders correctly.
+
+## n8n integration lessons (learned wiring Phase 1)
+
+- **Airtable Date fields need Typecast.** The payload's `started_at` is an ISO
+  datetime string; the Airtable node rejects it unless the node's Typecast option is
+  enabled. Turn Typecast on rather than reformatting dates in the workflow.
+- **Completed must be an expression, not a fixed toggle.** Bind the Airtable
+  checkbox to the payload's `completed` field. A fixed toggle in the node marks
+  every lead complete and silently destroys the complete/incomplete signal.
+- **Use the webhook's Production URL and keep the workflow Active.** The Test URL
+  only listens while the n8n editor is open with "Listen for test event" armed — it
+  works once during setup, then 404s forever. `N8N_WEBHOOK_URL` in `.env` must be
+  the Production URL, and the workflow's Active toggle must be on.
+- n8n runs in Docker (container `n8n`, port 5678, volume `n8n_data`, restart policy
+  `unless-stopped`). Airtable credentials live in n8n's credential store — never in
+  this repo's `.env`. `scripts/setup_airtable.py` provisions the table one-off.
+
+## Known issues / post-deploy checks
+
+- **Thinking-filler can fire before the greeting.** On a cold first turn, generating
+  the opening line can outlive `THINKING_FILLER_DELAY` (1.8s), so the caller's first
+  words from the agent can be "Got it — one moment." — nonsensical before any
+  greeting. Fix direction: suppress the filler on the very first agent turn.
+  Deliberately not fixed yet — re-evaluate after cloud deployment, where long-lived
+  workers and the in-place LLM connection warm-up may make the cold first turn moot.
+
 ## Phases (context for you; Phase 2+ is mostly human work)
 
-1. **Local agent (this sprint):** everything above, tested via console/Playground.
+1. **Local agent — ✅ DONE:** everything above, tested via console + a real call.
 2. **Telephony:** Twilio number → Elastic SIP Trunk → LiveKit inbound trunk + dispatch
    rule. Human does console config; you may be asked to write small setup scripts using
    `livekit-cli` / LiveKit SIP API.

@@ -91,6 +91,23 @@ async def test_missing_webhook_url_writes_to_disk_instead_of_raising(tmp_path, m
     assert (tmp_path / "call-1.json").is_file()
 
 
+def test_failed_webhook_dir_anchors_to_project_root_not_cwd(tmp_path, monkeypatch):
+    """The fallback dir must be findable no matter where the worker was launched."""
+    from agent.limits import PROJECT_ROOT
+    from agent.postcall import failed_webhook_dir
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FAILED_WEBHOOKS_DIR", raising=False)
+    assert failed_webhook_dir() == PROJECT_ROOT / "failed_webhooks"
+
+    monkeypatch.setenv("FAILED_WEBHOOKS_DIR", "custom_outbox")
+    assert failed_webhook_dir() == PROJECT_ROOT / "custom_outbox"
+
+    # An absolute env value still means exactly what it says.
+    monkeypatch.setenv("FAILED_WEBHOOKS_DIR", str(tmp_path / "elsewhere"))
+    assert failed_webhook_dir() == tmp_path / "elsewhere"
+
+
 def test_write_failed_creates_the_directory(tmp_path):
     target = tmp_path / "nested" / "failed_webhooks"
     path = write_failed(PAYLOAD, target)

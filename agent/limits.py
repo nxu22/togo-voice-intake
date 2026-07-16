@@ -19,6 +19,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+# agent/limits.py -> project root. Runtime state (the SQLite counters, and
+# failed_webhooks/ via postcall.py) must land in the same place no matter which
+# directory the worker was launched from.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def resolve_under_root(path: str | Path) -> Path:
+    """Anchor a relative path to the project root rather than the process cwd.
+
+    `python agent/main.py`, `python scripts/simulate_call.py`, and a worker launched
+    by a service manager all have different cwds; before this, each would grow its own
+    limits.db and failed_webhooks/ wherever it happened to be started. Absolute paths
+    pass through untouched, so the env vars can still point anywhere deliberate.
+    """
+    path = Path(path)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 # Spoken when a cap is hit. One line, then hang up — no STT/LLM loop is started.
 DAILY_LIMIT_MESSAGE = (
     "Thanks for calling Togo AI Automation — our demo line has reached its daily "
@@ -131,9 +149,8 @@ class RateLimiter:
         self._tz = ZoneInfo(self.config.timezone)
         self._now = now or (lambda: datetime.now(timezone.utc))
 
-        db_path = Path(db_path)
-        if db_path.parent != Path(""):
-            db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path = resolve_under_root(db_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(str(db_path), isolation_level=None)
         self._db.row_factory = sqlite3.Row
         # Each call runs in its own job process, so several may touch the file at once.

@@ -176,6 +176,26 @@ def test_in_progress_call_counts_toward_the_call_cap(limiter):
     assert stats.minutes_today == 0.0
 
 
+def test_relative_db_path_anchors_to_project_root_not_cwd(tmp_path, monkeypatch, config, clock):
+    """A worker launched from any directory must still find the same counters."""
+    from agent.limits import PROJECT_ROOT
+
+    monkeypatch.chdir(tmp_path)  # simulate launching from somewhere else entirely
+    anchored = PROJECT_ROOT / "test-anchor-limits.db"
+    try:
+        with RateLimiter("test-anchor-limits.db", config=config, now=clock):
+            assert anchored.exists()
+            assert not (tmp_path / "test-anchor-limits.db").exists()
+    finally:
+        for suffix in ("", "-wal", "-shm"):  # WAL mode leaves sidecar files
+            (PROJECT_ROOT / f"test-anchor-limits.db{suffix}").unlink(missing_ok=True)
+
+
+def test_absolute_db_path_is_respected(tmp_path, config, clock):
+    with RateLimiter(tmp_path / "explicit.db", config=config, now=clock):
+        assert (tmp_path / "explicit.db").exists()
+
+
 def test_config_from_env(monkeypatch):
     monkeypatch.setenv("DAILY_CALL_CAP", "100")
     monkeypatch.setenv("DAILY_SPEND_CAP_USD", "20")

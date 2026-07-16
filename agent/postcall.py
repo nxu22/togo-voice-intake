@@ -14,7 +14,7 @@ from pathlib import Path
 
 import httpx
 
-from agent.limits import DailyStats
+from agent.limits import DailyStats, resolve_under_root
 from agent.tools import CallState
 
 logger = logging.getLogger("togo.postcall")
@@ -47,7 +47,9 @@ def build_payload(
 
 
 def failed_webhook_dir() -> Path:
-    return Path(os.environ.get("FAILED_WEBHOOKS_DIR", "failed_webhooks"))
+    # Anchored to the project root, not cwd — a lead saved to a fallback file nobody
+    # can find is a lead lost with extra steps.
+    return resolve_under_root(os.environ.get("FAILED_WEBHOOKS_DIR", "failed_webhooks"))
 
 
 def write_failed(payload: dict[str, object], directory: Path | None = None) -> Path:
