@@ -31,11 +31,12 @@ import sys
 DID = "+14318307788"
 TRUNK_FRIENDLY_NAME = "Togo Intake -> LiveKit"
 
-# Derived from LIVEKIT_URL by scripts/setup_livekit_sip.py. CONFIRM against the LiveKit
-# dashboard (Project Settings) — a wrong host here means calls connect on the PSTN side
-# and then silently fail to reach the agent. Override with LIVEKIT_SIP_HOST if needed.
+# CONFIRMED against the LiveKit dashboard (Project Settings -> SIP URI) on 2026-07-18.
+# NOT derivable from LIVEKIT_URL — LiveKit assigns the SIP endpoint its own opaque
+# subdomain, distinct from the WebSocket project subdomain. Override with
+# LIVEKIT_SIP_HOST only if the dashboard value changes.
 LIVEKIT_SIP_HOST = os.environ.get(
-    "LIVEKIT_SIP_HOST", "togo-voice-agent-0pyszkt6.sip.livekit.cloud"
+    "LIVEKIT_SIP_HOST", "3q7qyv2h3pc.sip.livekit.cloud"
 )
 ORIGINATION_URI = f"sip:{LIVEKIT_SIP_HOST};transport=tcp"
 

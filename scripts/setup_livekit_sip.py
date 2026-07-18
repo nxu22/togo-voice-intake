@@ -37,19 +37,14 @@ RULE_NAME = "Togo Intake inbound → agent"
 ROOM_PREFIX = "togo-call"
 
 
-def sip_host_from_ws_url() -> str:
-    """Best-guess LiveKit Cloud SIP host, derived from LIVEKIT_URL.
+# The SIP host is NOT derivable from LIVEKIT_URL — LiveKit Cloud assigns the SIP
+# endpoint its own opaque subdomain, unrelated to the WebSocket project subdomain.
+# Confirmed from the dashboard (Project Settings -> SIP URI) on 2026-07-18.
+LIVEKIT_SIP_HOST = "3q7qyv2h3pc.sip.livekit.cloud"
 
-    A LiveKit Cloud project's SIP endpoint shares the project subdomain:
-    wss://myproj-ab12cd.livekit.cloud  ->  myproj-ab12cd.sip.livekit.cloud
-    CONFIRM this against the dashboard (Project Settings) before wiring Twilio — the
-    dashboard value is authoritative.
-    """
-    host = os.environ.get("LIVEKIT_URL", "").split("://")[-1].strip("/")
-    if host.endswith(".livekit.cloud"):
-        sub = host[: -len(".livekit.cloud")]
-        return f"{sub}.sip.livekit.cloud"
-    return "(non-cloud LIVEKIT_URL — find the SIP host in your dashboard)"
+
+def sip_host() -> str:
+    return os.environ.get("LIVEKIT_SIP_HOST", LIVEKIT_SIP_HOST)
 
 
 async def main() -> int:
@@ -115,8 +110,8 @@ async def main() -> int:
 def _print_twilio_hint() -> None:
     print("\n" + "=" * 64)
     print("Point your Twilio trunk's Origination URI at this LiveKit SIP host:")
-    print(f"\n    sip:{sip_host_from_ws_url()};transport=tcp\n")
-    print("Confirm the host against LiveKit dashboard -> Project Settings before use.")
+    print(f"\n    sip:{sip_host()};transport=tcp\n")
+    print("(confirmed from the dashboard 2026-07-18; override via LIVEKIT_SIP_HOST)")
     print("=" * 64)
 
 
