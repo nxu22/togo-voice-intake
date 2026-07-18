@@ -126,6 +126,12 @@ MIN_INTERRUPTION_WORDS = 2
 LLM_TEMPERATURE = 0.2
 LLM_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 
+# The name this worker registers under for EXPLICIT dispatch. The LiveKit SIP dispatch
+# rule references this exact string (see scripts/setup_livekit_sip.py), so an inbound
+# call pulls in this agent and nothing else. Console mode ignores it. Keep the two in
+# sync — that's why the setup script imports this constant rather than hardcoding it.
+AGENT_NAME = "togo-intake"
+
 # The Anthropic plugin defaults to strict tool schemas, which cost a schema-compilation
 # round trip and measured ~2x the time-to-first-token on our tools (p50 1730ms -> 897ms).
 # Our tools take plain optional strings and tolerate junk (see _clean in tools.py), so we
@@ -539,4 +545,10 @@ async def _cancel(task: asyncio.Task[None]) -> None:
 
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+            agent_name=AGENT_NAME,
+        )
+    )
