@@ -21,6 +21,16 @@ LEAD_FIELDS = (
     "desired_outcome",
 )
 
+# The lean intake only actively asks three things: business, what they want to
+# automate, and contact. So "complete" means those essentials are present — the
+# other fields (current_process, frequency, tools_used, desired_outcome) are captured
+# only if the caller volunteers them, and their absence does NOT make a lead incomplete.
+# Contact is checked separately via has_contact().
+REQUIRED_LEAD_FIELDS = (
+    "industry",
+    "biggest_time_sink",
+)
+
 
 @dataclass
 class Lead:
@@ -40,9 +50,14 @@ class Lead:
         return bool(self.contact_phone_or_email)
 
     def is_complete(self) -> bool:
-        """A lead counts as complete only with contact info — see CLAUDE.md v1 req 2."""
+        """Complete = contact info + the lean essentials (business + what to automate).
+
+        Contact is the one hard-required field (CLAUDE.md v1 req 2). Beyond that, the
+        lean script only guarantees business + need, so those define completeness; the
+        remaining fields are bonus context, not required.
+        """
         return self.has_contact() and all(
-            getattr(self, name) for name in LEAD_FIELDS
+            getattr(self, name) for name in REQUIRED_LEAD_FIELDS
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -119,14 +134,16 @@ async def capture_lead(
     which is how you apply a correction during readback.
 
     Args:
-        industry: The caller's company and industry (question 1).
-        biggest_time_sink: The task that eats the most time (question 2).
-        current_process: How they handle that task today (question 3).
-        frequency: How often it comes up, e.g. daily or weekly (question 4).
-        tools_used: Software or tools they currently use (question 5).
-        desired_outcome: The result they'd want if it were automated (question 6).
-        contact_name: The caller's name (question 7).
-        contact_phone_or_email: Their callback number or email (question 7). Required.
+        industry: The caller's company and industry (asked). Essential.
+        biggest_time_sink: The task/headache they want to automate or hand off
+            (asked). Essential — this is what they called about.
+        desired_outcome: The result they'd want if it were automated — record it if
+            they describe one while answering, don't ask separately.
+        current_process: How they handle the task today — record only if volunteered.
+        frequency: How often it comes up — record only if volunteered.
+        tools_used: Software/tools they currently use — record only if volunteered.
+        contact_name: The caller's name (asked).
+        contact_phone_or_email: Their callback number or email (asked). Required.
     """
     lead = context.userdata.lead
     updates = {
@@ -147,12 +164,14 @@ async def capture_lead(
         "capture_lead updated %s (complete=%s)", applied or "nothing", lead.is_complete()
     )
 
-    missing = [name for name in LEAD_FIELDS if not getattr(lead, name)]
+    # Only nudge for the lean essentials — never for the optional context fields, or
+    # the agent would start asking questions the lean script deliberately dropped.
+    missing = [name for name in REQUIRED_LEAD_FIELDS if not getattr(lead, name)]
     if not lead.has_contact():
         missing.append("contact_phone_or_email")
     if missing:
-        return f"Recorded. Still missing: {', '.join(missing)}."
-    return "Recorded. All answers captured — read them back to confirm."
+        return f"Recorded. Still need: {', '.join(missing)}."
+    return "Recorded. You have the essentials — read them back to confirm, then wrap up."
 
 
 @function_tool

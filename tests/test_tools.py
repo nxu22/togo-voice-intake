@@ -49,7 +49,10 @@ async def test_capture_lead_accumulates_across_calls(ctx, state):
 async def test_capture_lead_reports_what_is_still_missing(ctx):
     result = await capture_lead(ctx, industry="bakery")
     assert "contact_phone_or_email" in result
-    assert "desired_outcome" in result
+    assert "biggest_time_sink" in result  # the other essential, still missing
+    # The dropped optional fields must NOT be nudged for, or the agent re-asks them.
+    assert "frequency" not in result
+    assert "tools_used" not in result
 
 
 async def test_lead_is_incomplete_without_contact(ctx, state):
@@ -72,6 +75,25 @@ async def test_lead_is_complete_with_all_seven_answers(ctx, state):
     await _answer_everything(ctx)
     assert state.lead.is_complete()
     assert state.lead.has_contact()
+
+
+async def test_lean_lead_is_complete_with_just_the_essentials(ctx, state):
+    """The lean script only guarantees business + need + contact — that's complete.
+
+    The dropped fields (current_process, frequency, tools_used, desired_outcome) being
+    empty must NOT make the lead incomplete, or the Airtable 'Completed' flag would
+    never tick for a normal lean call.
+    """
+    await capture_lead(
+        ctx,
+        industry="Sunrise Bakery, food service",
+        biggest_time_sink="taking phone orders",
+        contact_name="Dana Reyes",
+        contact_phone_or_email="204-555-0101",
+    )
+    assert state.lead.is_complete()
+    assert not state.lead.frequency  # never asked, still complete
+    assert not state.lead.tools_used
 
 
 async def test_capture_lead_overwrites_on_correction(ctx, state):
