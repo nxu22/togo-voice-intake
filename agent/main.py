@@ -590,7 +590,11 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(lambda: _cancel(warm_task))
 
     await session.generate_reply(
-        instructions="Greet the caller with your opening line and ask if it's a good time."
+        instructions=(
+            "Say only your opening greeting line, ending with 'Sound good?'. Then stop "
+            "and wait for the caller to respond. Do NOT ask your first intake question "
+            "yet — that comes after they reply."
+        )
     )
     # Greeting has now played — from here a slow turn is worth a filler.
     filler_state["greeted"] = True
