@@ -489,13 +489,20 @@ async def entrypoint(ctx: JobContext) -> None:
     # Dead-air guard. A stalled LLM request (or a slow tool + long readback) left a
     # caller listening to silence long enough to ask "Hello? Can you hear me?" three
     # times. If we're still generating after THINKING_FILLER_DELAY, say so.
-    filler_state: dict[str, object] = {"task": None, "index": 0}
+    filler_state: dict[str, object] = {"task": None, "index": 0, "greeted": False}
 
     async def _speak_filler() -> None:
         try:
             await asyncio.sleep(THINKING_FILLER_DELAY)
         except asyncio.CancelledError:
             return  # generation finished in time — the common case
+        # Never fill on the very first turn: generating the greeting on a cold start can
+        # outlive THINKING_FILLER_DELAY, and a filler here fires "one moment" BEFORE the
+        # caller has heard any greeting — nonsensical. A slow greeting just reads as a
+        # slightly longer ring; the filler only makes sense once we've actually spoken.
+        if not filler_state["greeted"]:
+            logger.debug("suppressing filler: greeting not spoken yet")
+            return
         # Never fill a thinking pause. Preemptive generation can put us in "thinking"
         # on a turn we are about to discard, and speaking here would just recreate the
         # interruption we removed — a filler on top of a caller mid-sentence.
@@ -585,6 +592,8 @@ async def entrypoint(ctx: JobContext) -> None:
     await session.generate_reply(
         instructions="Greet the caller with your opening line and ask if it's a good time."
     )
+    # Greeting has now played — from here a slow turn is worth a filler.
+    filler_state["greeted"] = True
 
 
 async def _cancel(task: asyncio.Task[None]) -> None:

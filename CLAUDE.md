@@ -127,12 +127,13 @@ renders correctly.
 
 ## Known issues / post-deploy checks
 
-- **Thinking-filler can fire before the greeting.** On a cold first turn, generating
-  the opening line can outlive `THINKING_FILLER_DELAY` (1.8s), so the caller's first
-  words from the agent can be "Got it — one moment." — nonsensical before any
-  greeting. Fix direction: suppress the filler on the very first agent turn.
-  Deliberately not fixed yet — re-evaluate after cloud deployment, where long-lived
-  workers and the in-place LLM connection warm-up may make the cold first turn moot.
+- **Thinking-filler firing before the greeting — FIXED (2026-07-20).** On a cold
+  first turn, generating the opening line outlived `THINKING_FILLER_DELAY` (1.8s), so
+  the caller's first words from the agent were "Got it — one moment." — nonsensical
+  before any greeting. Confirmed live after cloud deployment (scale-to-zero means every
+  quiet-gap call is a cold start, so it was NOT moot). Fixed by suppressing the filler
+  until the greeting has played (`filler_state["greeted"]` in main.py): a slow greeting
+  now reads as a slightly longer ring instead of a stray "one moment".
 
 ## Phases (context for you; Phase 2+ is mostly human work)
 
