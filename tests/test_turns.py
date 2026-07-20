@@ -29,6 +29,9 @@ from agent.turns import looks_unfinished
         "We do it because",
         "My business is a",
         "That happens when",
+        # "so" as a genuine conjunction still dangles (not preceded by think/guess/hope).
+        "We keep missing calls so",
+        "It takes forever so",
         # Mid-list breath.
         "Square, Excel,",
         # Pure hesitation.
@@ -66,6 +69,11 @@ def test_trailed_off_mid_sentence(text):
         "No.",
         "Yes.",
         "Sounds good.",
+        # "so" dangles as a conjunction, but these are complete replies to "Sound good?".
+        "I think so.",
+        "I guess so.",
+        "I hope so.",
+        "Yeah, I believe so.",
         # A question back at us is a complete turn.
         "How much does this cost?",
         # Empty / silence is not "unfinished" — there is nothing to wait for.

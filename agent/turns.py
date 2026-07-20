@@ -33,6 +33,14 @@ _DANGLING_WORDS = frozenset(
 
 _FILLERS = frozenset("um uh er erm hmm uhh ah eh".split())
 
+# "so" is in the dangling set because it dangles as a conjunction ("we miss calls, so
+# ..."). But it also ends these very common short answers — "I think so", "I guess so",
+# "I hope so" — which are complete. Told apart by the verb right before it. Without this,
+# "I think so." (a normal reply to "Sound good?") was held as unfinished and drew a nudge.
+_SO_COMPLETERS = frozenset(
+    "think thought guess hope believe suppose reckon said say".split()
+)
+
 # Deepgram may or may not punctuate. "The company's name is." is just as unfinished as
 # "The company's name is", so judge the word, not the punctuation.
 _TRAILING_PUNCT = re.compile(r"[\s.;:!?\-–—]+$")
@@ -65,5 +73,9 @@ def looks_unfinished(text: str) -> bool:
     # A lone filler is never an answer.
     if len(words) == 1 and words[0] in _FILLERS:
         return True
+
+    # "I think so" / "I guess so" — complete, despite ending on a normally-dangling "so".
+    if words[-1] == "so" and len(words) >= 2 and words[-2] in _SO_COMPLETERS:
+        return False
 
     return words[-1] in _DANGLING_WORDS
