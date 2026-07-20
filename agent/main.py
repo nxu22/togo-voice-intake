@@ -493,8 +493,13 @@ async def entrypoint(ctx: JobContext) -> None:
     @session.on("conversation_item_added")
     def _on_item(event: ConversationItemAddedEvent) -> None:
         item = event.item
-        if getattr(item, "role", None) in ("user", "assistant"):
-            state.add_transcript(item.role, item.text_content or "")
+        role = getattr(item, "role", None)
+        if role in ("user", "assistant"):
+            text = item.text_content or ""
+            state.add_transcript(role, text)
+            # Log every turn so the deploy log holds the full verbatim conversation —
+            # the only way to see what the STT actually heard and where a turn stalled.
+            logger.info("turn %s: %r", role, text)
 
     # Dead-air guard. A stalled LLM request (or a slow tool + long readback) left a
     # caller listening to silence long enough to ask "Hello? Can you hear me?" three
