@@ -152,6 +152,20 @@ async def test_capture_lead_overwrites_on_correction(ctx, state):
     assert state.lead.industry == "Sunrise Bakery, food service"  # untouched
 
 
+async def test_capture_lead_drops_leaked_tool_call_markup(ctx, state):
+    # A model tool-call glitch once leaked parameter delimiters into field values.
+    # None of that garbage may reach the lead / the CRM.
+    await capture_lead(
+        ctx,
+        industry="food truck",
+        current_process='</parameter>\n<parameter name="frequency">',
+        desired_outcome="antml:parameter",
+    )
+    assert state.lead.industry == "food truck"  # the real answer survives
+    assert state.lead.current_process is None  # leaked markup dropped
+    assert state.lead.desired_outcome is None
+
+
 async def test_capture_lead_ignores_empty_and_null_like_values(ctx, state):
     await capture_lead(ctx, industry="bakery")
     await capture_lead(ctx, industry="   ", biggest_time_sink="null")

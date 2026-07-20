@@ -132,6 +132,12 @@ def _clean(value: str | None) -> str | None:
     value = value.strip()
     if not value or value.lower() in {"null", "none", "n/a", "unknown"}:
         return None
+    # A model tool-call glitch can leak the XML-ish parameter delimiters into a field
+    # value ("</parameter>\n<parameter name=..."). Seen when a messy call confused the
+    # model into filling fields it had no answer for. That is never a real answer — drop
+    # it so the garbage never reaches the CRM.
+    if any(marker in value for marker in ("<parameter", "parameter>", "antml")):
+        return None
     return value
 
 
