@@ -57,7 +57,11 @@ logger = logging.getLogger("togo.agent")
 # further if callers still get cut off; lower them if the agent feels sluggish.
 
 # Silence the caller must leave before we consider their turn finished.
-MIN_ENDPOINTING_DELAY = 0.8  # seconds
+# Raised from 0.8s after a live call: Deepgram sometimes delivered the final
+# transcript AFTER the turn had been committed (livekit warned "transcript arrives
+# after turn has been committed... raise min_delay"), so the agent cut callers off.
+# A bit more patience here waits out the slow STT instead of talking over them.
+MIN_ENDPOINTING_DELAY = 1.3  # seconds
 
 # The endpointing delay is BINARY, not graduated (audio_recognition.py): the wait is
 # min_delay, unless end-of-turn probability < unlikely_threshold, in which case it is
@@ -89,10 +93,10 @@ THINKING_FILLERS = (
     "Right, just a second.",
 )
 
-# How long a caller may sit in silence mid-sentence before we check in. A caller
-# thinking of their company name took ~4s, and heard two interjections in that time.
-# Nothing at all should happen inside that window.
-DANGLING_NUDGE_SECONDS = 7.0
+# How long a caller may sit in silence mid-sentence before we check in. Lowered from
+# 7s after a live call: when a caller trailed off ("...calling part,") the 7s of dead
+# air read as "did the line drop?". 4s still gives a thinker room without a long silence.
+DANGLING_NUDGE_SECONDS = 4.0
 # Don't hold the line forever if the heuristic keeps mis-firing on the same caller.
 MAX_CONSECUTIVE_HOLDS = 2
 NUDGE_INSTRUCTIONS = (
