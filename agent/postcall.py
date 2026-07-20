@@ -32,6 +32,11 @@ def build_payload(
     end_reason: str,
 ) -> dict[str, object]:
     """The exact shape n8n expects (see CLAUDE.md v1 requirement 4)."""
+    lead = state.lead.to_dict()
+    # A phone lead is reachable at the number they called from even if the agent never
+    # recorded a separate contact — backfill it so the CRM never shows a blank number
+    # for a call we could return. An explicitly dictated contact is left untouched.
+    lead["contact"]["phone_or_email"] = state.effective_contact()
     return {
         "call_id": state.call_id,
         "caller_id": state.caller_id,
@@ -39,7 +44,7 @@ def build_payload(
         "duration_seconds": round(state.duration_seconds(), 1),
         "completed": completed,
         "end_reason": end_reason,
-        "lead": state.lead.to_dict(),
+        "lead": lead,
         "messages": list(state.lead.messages),
         "transcript": list(state.transcript),
         "daily_stats": stats.to_dict(),

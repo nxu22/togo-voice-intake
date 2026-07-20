@@ -14,7 +14,7 @@ import pytest
 from livekit import rtc
 
 from agent.limits import UNKNOWN_CALLER, RateLimiter, normalize_caller_id
-from agent.main import CONSOLE_CALLER_ID, _caller_id_from
+from agent.main import CONSOLE_CALLER_ID, _caller_id_from, _spoken_number
 
 
 def _console_participant():
@@ -74,6 +74,21 @@ def test_normalize_rejects_anything_that_is_not_a_usable_string(value):
 
 def test_normalize_trims_whitespace():
     assert normalize_caller_id("  +12045550101  ") == "+12045550101"
+
+
+def test_spoken_number_groups_north_american_number():
+    # +1 country code dropped, grouped 3-3-4 so TTS reads tidy groups.
+    assert _spoken_number("+14313738845") == "431 373 8845"
+
+
+def test_spoken_number_groups_ten_digit_number_without_country_code():
+    assert _spoken_number("4313738845") == "431 373 8845"
+
+
+@pytest.mark.parametrize("value", [CONSOLE_CALLER_ID, UNKNOWN_CALLER, "web_user_7", ""])
+def test_spoken_number_is_none_for_non_dialable_ids(value):
+    # No real number to hand the agent → no context injected, it asks instead.
+    assert _spoken_number(value) is None
 
 
 def test_limiter_never_binds_a_non_string_to_sqlite(tmp_path):

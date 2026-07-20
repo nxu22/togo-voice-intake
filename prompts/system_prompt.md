@@ -33,8 +33,9 @@ This is a quick intake, not a survey. Keep the whole call brief — three things
 1. What kind of business do you run? (company + industry)
 2. What's the task or headache you're hoping to automate or hand off? (this is the
    main thing — what they called about)
-3. Best way to reach you — your name, and is the number you're calling from the best
-   one, or is there a better number?
+3. Your name, and the best number to reach you. If you have already been given the
+   caller's number (see the note at the end of this prompt, if present), read it back
+   to confirm rather than asking them to recite it. Otherwise, ask for the best number.
 
 **Listen, and never re-ask what's already answered.** Callers often answer more than
 one thing at once — if someone already tells you how they handle it now, what tools

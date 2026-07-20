@@ -87,6 +87,27 @@ class CallState:
     # Read by the dead-air filler, which must stay quiet during a thinking pause.
     awaiting_continuation: bool = False
 
+    def effective_contact(self) -> str | None:
+        """The captured contact, or the caller's own number as a fallback.
+
+        The agent should confirm and record the caller's number explicitly, but if it
+        never does (it flubbed the question, the caller was terse), we still have the
+        number they're calling from — a phone lead is never contactless when we can just
+        call them back. An explicit contact the caller dictated always wins over this.
+        """
+        return self.lead.contact_phone_or_email or phone_fallback(self.caller_id)
+
+    def lead_is_complete(self) -> bool:
+        """Like Lead.is_complete(), but the caller's own number counts as contact.
+
+        Lead alone can't know the caller_id, so completeness that credits the fallback
+        number lives here on CallState. Used for the payload's `completed` flag and the
+        daily leads-captured counter.
+        """
+        return bool(self.effective_contact()) and all(
+            getattr(self.lead, name) for name in REQUIRED_LEAD_FIELDS
+        )
+
     def duration_seconds(self) -> float:
         end = self.ended_at or datetime.now(timezone.utc)
         return max(0.0, (end - self.started_at).total_seconds())
@@ -112,6 +133,29 @@ def _clean(value: str | None) -> str | None:
     if not value or value.lower() in {"null", "none", "n/a", "unknown"}:
         return None
     return value
+
+
+# Caller IDs that are not something a human can dial back. Console/simulation use
+# placeholders, and a withheld number arrives as one of these.
+_NON_DIALABLE_CALLER_IDS = {"console", "unknown", "anonymous", "restricted", ""}
+
+
+def phone_fallback(caller_id: str | None) -> str | None:
+    """The caller's own number, usable as a contact — or None if it isn't dialable.
+
+    A phone caller is always reachable at the number they're calling from, so a real
+    caller_id is a valid fallback when they don't dictate a separate contact. Placeholder
+    IDs (console/unknown/withheld) are not, and must not masquerade as a captured lead.
+    """
+    if not caller_id:
+        return None
+    cid = caller_id.strip()
+    if cid.lower() in _NON_DIALABLE_CALLER_IDS:
+        return None
+    # Needs enough digits to actually be a phone number, not e.g. a web SDK identity.
+    if sum(c.isdigit() for c in cid) < 7:
+        return None
+    return cid
 
 
 @function_tool

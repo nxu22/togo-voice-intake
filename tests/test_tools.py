@@ -7,7 +7,7 @@ import pytest
 
 from agent.limits import DailyStats
 from agent.postcall import build_payload
-from agent.tools import CallState, capture_lead, take_message
+from agent.tools import CallState, capture_lead, phone_fallback, take_message
 
 STARTED = datetime(2026, 7, 12, 18, 0, tzinfo=timezone.utc)
 
@@ -94,6 +94,54 @@ async def test_lean_lead_is_complete_with_just_the_essentials(ctx, state):
     assert state.lead.is_complete()
     assert not state.lead.frequency  # never asked, still complete
     assert not state.lead.tools_used
+
+
+@pytest.mark.parametrize(
+    "caller_id,expected",
+    [
+        ("+12045550101", "+12045550101"),
+        ("2045550101", "2045550101"),
+        ("console", None),
+        ("unknown", None),
+        ("anonymous", None),
+        ("web_user_7", None),  # a web identity, not a dialable number
+        ("", None),
+    ],
+)
+def test_phone_fallback_only_accepts_dialable_numbers(caller_id, expected):
+    assert phone_fallback(caller_id) == expected
+
+
+async def test_effective_contact_prefers_the_dictated_contact(ctx, state):
+    await capture_lead(ctx, contact_phone_or_email="dana@sunrisebakery.ca")
+    # An explicit contact the caller gave wins over the caller ID.
+    assert state.effective_contact() == "dana@sunrisebakery.ca"
+
+
+def test_effective_contact_falls_back_to_the_caller_id(state):
+    # Caller never dictated a contact, but they're on the phone — we can call them back.
+    assert not state.lead.has_contact()
+    assert state.effective_contact() == "+12045550101"
+
+
+def test_effective_contact_is_none_for_a_placeholder_caller_id():
+    state = CallState(call_id="c", caller_id="console", started_at=STARTED)
+    assert state.effective_contact() is None
+
+
+async def test_lead_is_complete_counts_the_caller_id_as_contact(ctx, state):
+    # Business + need captured, no dictated contact — still complete, we have their number.
+    await capture_lead(ctx, industry="bakery", biggest_time_sink="phone orders")
+    assert not state.lead.is_complete()  # Lead alone doesn't know the caller_id
+    assert state.lead_is_complete()  # CallState credits the number they called from
+
+
+async def test_build_payload_backfills_contact_from_caller_id(ctx, state):
+    await capture_lead(ctx, industry="bakery", biggest_time_sink="phone orders")
+    payload = build_payload(
+        state, DailyStats(1, 1.0, 1), completed=True, end_reason="agent_goodbye"
+    )
+    assert payload["lead"]["contact"]["phone_or_email"] == "+12045550101"
 
 
 async def test_capture_lead_overwrites_on_correction(ctx, state):

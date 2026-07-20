@@ -44,7 +44,13 @@ from livekit.plugins import anthropic, cartesia, deepgram, silero
 from agent.limits import UNKNOWN_CALLER, LimitConfig, RateLimiter
 from agent.postcall import build_payload, deliver
 from agent.prompts import get_language
-from agent.tools import CallState, capture_lead, end_call, take_message
+from agent.tools import (
+    CallState,
+    capture_lead,
+    end_call,
+    phone_fallback,
+    take_message,
+)
 from agent.turns import looks_unfinished
 
 load_dotenv()
@@ -159,6 +165,22 @@ WRAPUP_INSTRUCTIONS = (
     "and close politely. Keep it brief."
 )
 
+# Appended to the system prompt when we know the caller's number (an inbound phone
+# call). Without this the agent had no idea what number the caller was on, so asking
+# "is the number you're calling from best?" forced the caller to recite it — and a
+# reply like "the one I'm calling from" both records nothing dialable and trips the
+# mid-sentence hold. Handing the agent the actual digits fixes both.
+CALLER_NUMBER_CONTEXT = """
+
+## The caller's number — you already have it
+
+This caller is phoning from {number}. That is almost certainly their best callback
+number. For the contact question, do NOT ask them to recite a number. Instead, get
+their name, then read this number back slowly to confirm — "I have your number as
+{number} — is that the best one to reach you, or is there a better number?" — and
+record it with capture_lead. Only record a different number if they give you one.
+"""
+
 
 class IntakeAgent(Agent):
     """The intake agent, plus one rule the turn detector can't express: don't talk over
@@ -271,6 +293,23 @@ def _first_string(*candidates: object) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _spoken_number(caller_id: str) -> str | None:
+    """A caller_id grouped for the agent to read aloud, or None if it isn't a number.
+
+    "+14313738845" -> "431 373 8845" so TTS says the digits in tidy groups instead of
+    one long run. Non-numbers (console/unknown/web identities) return None, and no
+    number context is injected — the agent falls back to asking for a contact.
+    """
+    if phone_fallback(caller_id) is None:
+        return None
+    digits = [c for c in caller_id if c.isdigit()]
+    if len(digits) == 11 and digits[0] == "1":  # NANP with country code
+        digits = digits[1:]
+    if len(digits) == 10:  # North American: 3-3-4
+        return f"{''.join(digits[:3])} {''.join(digits[3:6])} {''.join(digits[6:])}"
+    return " ".join(digits)  # anything else: spaced so it's read digit by digit
 
 
 def _caller_id_from(participant: rtc.RemoteParticipant | None) -> str:
@@ -483,19 +522,19 @@ async def entrypoint(ctx: JobContext) -> None:
     async def _on_shutdown() -> None:
         state.ended_at = datetime.now(timezone.utc)
         limiter.end_call(call_id, state.duration_seconds())
-        if state.lead.is_complete():
+        if state.lead_is_complete():
             limiter.mark_lead_captured(call_id)
         else:
             logger.warning(
                 "incomplete lead for call %s (contact=%s)",
                 call_id,
-                state.lead.has_contact(),
+                bool(state.effective_contact()),
             )
 
         payload = build_payload(
             state,
             limiter.daily_stats(),
-            completed=state.lead.is_complete(),
+            completed=state.lead_is_complete(),
             end_reason=state.end_reason,
         )
         try:
@@ -505,9 +544,17 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.add_shutdown_callback(_on_shutdown)
 
+    # Hand the agent the caller's own number so it confirms it instead of asking the
+    # caller to recite one. Only when we actually have a dialable number — console and
+    # withheld-number calls fall back to the prompt's plain "ask for a contact" path.
+    instructions = language.system_prompt()
+    spoken_number = _spoken_number(caller_id)
+    if spoken_number:
+        instructions += CALLER_NUMBER_CONTEXT.format(number=spoken_number)
+
     await session.start(
         IntakeAgent(
-            instructions=language.system_prompt(),
+            instructions=instructions,
             tools=[capture_lead, take_message, end_call],
         ),
         room=ctx.room,
