@@ -181,6 +181,16 @@ their name, then read this number back slowly to confirm — "I have your number
 record it with capture_lead. Only record a different number if they give you one.
 """
 
+# The opening is a FIXED line, so we speak it directly (straight to TTS) instead of
+# asking the LLM to generate it. Generating the greeting added first-turn latency that,
+# with the filler now suppressed before the greeting, the caller heard as dead silence
+# ("hello? are you still there?"). Speaking a constant is instant and guarantees the
+# exact wording. Keep this in sync with the opening in prompts/system_prompt.md.
+OPENING_LINE = (
+    "Hi, this is Togo, your AI assistant. I'll ask you a couple of quick questions "
+    "about your business, and a real person will follow up with you. Sound good?"
+)
+
 
 class IntakeAgent(Agent):
     """The intake agent, plus one rule the turn detector can't express: don't talk over
@@ -589,13 +599,12 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(lambda: _cancel(limit_task))
     ctx.add_shutdown_callback(lambda: _cancel(warm_task))
 
-    await session.generate_reply(
-        instructions=(
-            "Say only your opening greeting line, ending with 'Sound good?'. Then stop "
-            "and wait for the caller to respond. Do NOT ask your first intake question "
-            "yet — that comes after they reply."
-        )
-    )
+    # Speak the fixed opening straight to TTS — no LLM round-trip, so it starts almost
+    # immediately and the caller never hears dead air before the greeting. The session
+    # then waits for the caller, so the agent won't roll into the first question until
+    # they've answered "Sound good?".
+    greeting = session.say(OPENING_LINE)
+    await greeting.wait_for_playout()
     # Greeting has now played — from here a slow turn is worth a filler.
     filler_state["greeted"] = True
 
