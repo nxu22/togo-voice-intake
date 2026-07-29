@@ -1,6 +1,6 @@
 # Togo Voice Intake
 
-A self-hosted inbound voice agent that answers a real phone number, asks seven
+A self-hosted inbound voice agent that answers a real phone number, asks three
 structured intake questions, reads the answers back to confirm, and posts the
 lead to n8n. Built on LiveKit + Deepgram + Cartesia + Claude — no managed voice
 platform in between.
@@ -53,8 +53,8 @@ the fragment is buffered onto the next one, and the agent nudges gently after
 `DANGLING_NUDGE_SECONDS = 4.0`. Capped at `MAX_CONSECUTIVE_HOLDS = 2` so a silent
 caller cannot deadlock the conversation.
 
-Exceptions are hardcoded — "I think so", "I guess" end on a dangling word but are
-complete answers.
+Exceptions are hardcoded — "I think so", "I guess so" end on a dangling word but
+are complete answers.
 
 ---
 
@@ -66,11 +66,12 @@ redoing this measurement from scratch. That is a real gap, not a nitpick.
 
 | Change | Effect |
 | --- | --- |
-| Strict tool schema | TTFT p50 **1730ms → 897ms** |
+| Strict tool schema **disabled** | TTFT p50 **1730ms → 897ms** |
 | Warmed TLS connection at prewarm | first request **4–7s → <1s** |
 | `PREEMPTIVE_GENERATION` | starts the LLM before turn commit, hiding TTFT |
 
-Steady state: ~700ms time-to-first-token, ~1000ms per turn.
+Steady state: ~690ms p50 time-to-first-token; the cold first turn of a call is
+~1000ms.
 
 ---
 
@@ -80,7 +81,7 @@ Steady state: ~700ms time-to-first-token, ~1000ms per turn.
 Inbound call → Twilio → LiveKit SIP → this worker
   ├─ rate limits checked BEFORE any STT/LLM runs
   ├─ Deepgram STT · Claude Haiku · Cartesia TTS · Silero VAD
-  ├─ tools: capture_lead (the 7 answers) · take_message (off-script questions)
+  ├─ tools: capture_lead (the intake answers) · take_message (off-script questions)
   └─ on call end (any reason) → POST to N8N_WEBHOOK_URL
 ```
 
@@ -126,9 +127,12 @@ Each payload carries running daily stats (`calls_today`, `minutes_today`,
 `leads_captured_today`) so n8n can build a daily report without querying
 anything.
 
-A lead is marked `completed` only if all seven answers and contact info are
-present. Calls that end without contact info are still delivered, flagged
-incomplete, so a human can see what was missed.
+A lead is marked `completed` only if contact info is present alongside the two
+essentials the script actually asks for — the business and what they want
+automated. The optional fields (current process, tools, frequency) are recorded
+only when a caller volunteers them and never block completeness. Calls that end
+without contact info are still delivered, flagged incomplete, so a human can see
+what was missed.
 
 ---
 
@@ -147,11 +151,12 @@ python scripts/simulate_call.py          # print the captured lead + payload
 python scripts/simulate_call.py --post   # also POST to N8N_WEBHOOK_URL
 ```
 
-Plays a scripted business owner through all seven questions against the real
-Claude model and the real tools — no STT, no TTS, no audio. It checks that all
-seven questions are asked, that `capture_lead` accumulates them, that a planted
-pricing question is deflected into `take_message` rather than answered, and that
-the readback happens before the goodbye. Costs a few cents of Anthropic usage.
+Plays a scripted business owner through the whole intake against the real Claude
+model and the real tools — no STT, no TTS, no audio. It checks that
+`capture_lead` ends up with a complete lead, that a planted pricing question is
+deflected into `take_message` rather than answered, that the readback happens
+before the goodbye, and that the agent hangs up instead of narrating its own
+plumbing. Costs a few cents of Anthropic usage.
 
 This is the fastest way to check a prompt change did not break the script. **It
 cannot tell you how the turn-taking feels** — only a real console call can. The
@@ -207,7 +212,7 @@ agent/
   limits.py    three-layer rate limiting (SQLite)
   postcall.py  webhook POST with retries + disk fallback
 prompts/
-  system_prompt.md    persona and the 7-question script
+  system_prompt.md    persona and the 3-question script
 tests/
 scripts/
   simulate_call.py    full-script dry run, no audio
