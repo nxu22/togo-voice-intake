@@ -10,8 +10,11 @@ from livekit.agents import RunContext, function_tool, get_job_context
 
 logger = logging.getLogger("togo.tools")
 
-# The seven intake answers, in script order. Contact is stored separately because
-# it is the one required field — a lead without it is logged as incomplete.
+# The intake answer fields. Only industry and biggest_time_sink are still actively
+# asked (see REQUIRED_LEAD_FIELDS); the rest survive from the original seven-question
+# script and are filled only when a caller volunteers them. Contact is stored
+# separately because it is the one required field — a lead without it is logged
+# as incomplete.
 LEAD_FIELDS = (
     "industry",
     "biggest_time_sink",

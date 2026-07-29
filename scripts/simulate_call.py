@@ -2,7 +2,7 @@
 
 Uses livekit's simulation harness (AgentSession.run) against the REAL Claude model
 and the REAL capture_lead / take_message tools, so it exercises everything except
-the audio path. It is the cheapest way to check the seven-question script, the tool
+the audio path. It is the cheapest way to check the intake script, the tool
 accumulation, the readback, and the webhook payload.
 
     python scripts/simulate_call.py            # simulate, print payload, don't POST

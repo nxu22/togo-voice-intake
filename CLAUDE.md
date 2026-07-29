@@ -3,7 +3,7 @@
 ## What this project is
 
 A phone-based AI intake agent for **Togo AI Automation** (Winnipeg AI automation consultancy).
-Anyone can call a public phone number; the agent asks seven structured questions about the
+Anyone can call a public phone number; the agent asks three structured questions about the
 caller's business and pain points, reads back a summary, captures the lead, and hangs up
 politely. Captured leads are POSTed to an existing n8n webhook (→ email notification + Airtable CRM).
 
@@ -49,19 +49,25 @@ togo-voice-intake/
 │   ├── limits.py          ← 3-layer rate limiting (see below)
 │   └── postcall.py        ← webhook POST on call end
 ├── prompts/
-│   └── system_prompt.md   ← the agent's persona + 7-question script (already written)
+│   └── system_prompt.md   ← the agent's persona + 3-question script (already written)
 ├── tests/                 ← pytest for limits.py, tools.py payload shape, postcall.py
 └── README.md
 ```
 
 ## v1 requirements (all mandatory, not "phase 4 nice-to-haves")
 
-1. **Seven-question intake flow** as defined in `prompts/system_prompt.md`, ending with a
-   readback confirmation before hangup.
-2. **capture_lead tool** — accumulates the 7 answers into one structured object:
+1. **Three-question intake flow** as defined in `prompts/system_prompt.md`, ending with a
+   readback confirmation before hangup: (1) what kind of business, (2) the task or
+   headache they want automated, (3) name + best callback number. This started as a
+   seven-question script; `f4c66e3` cut it to three because a phone caller will not sit
+   through a survey — do NOT restore the extra questions as questions.
+2. **capture_lead tool** — accumulates the answers into one structured object:
    `{industry, biggest_time_sink, current_process, frequency, tools_used, desired_outcome,
-   contact: {name, phone_or_email}}`. Contact info is REQUIRED — the agent must not end
-   the call successfully without it (if refused, log as incomplete lead).
+   contact: {name, phone_or_email}}`. The object shape is unchanged, but only `industry`
+   and `biggest_time_sink` are actively asked; the rest are recorded only when a caller
+   volunteers them and their absence does NOT make a lead incomplete. Contact info is
+   REQUIRED — the agent must not end the call successfully without it (if refused, log
+   as incomplete lead).
 3. **take_message tool** — any off-script question or statement from the caller gets stored
    verbatim in a `messages[]` array on the same lead object.
 4. **Post-call webhook** — on call end (any reason), POST to `N8N_WEBHOOK_URL`:
@@ -104,6 +110,8 @@ Human runs console mode, completes a full 7-question call as a fake business own
 hears an accurate readback, hangs up, and within seconds the n8n webhook receives a
 correctly shaped payload. `pytest` passes. Rate-limit logic unit-tested including the
 midnight reset and the $10 estimate math.
+(The script was seven questions when this was signed off; `f4c66e3` later cut it to
+three. Left as written — this records what was actually verified on 2026-07-14.)
 
 Verified end-to-end with a real voice call: full intake, accurate readback, agent
 hangs up on its own, Airtable row lands with Completed checked, notification email

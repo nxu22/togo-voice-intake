@@ -43,7 +43,7 @@ FIELDS: list[dict[str, object]] = [
         "name": "Completed",
         "type": "checkbox",
         "options": {"icon": "check", "color": "greenBright"},
-    },  # payload: completed — all seven answers AND contact info
+    },  # payload: completed — contact info AND industry AND biggest_time_sink
     {"name": "End Reason", "type": "singleLineText"},  # agent_goodbye|time_limit|caller_hangup
     {
         "name": "Duration",
