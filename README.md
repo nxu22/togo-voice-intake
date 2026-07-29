@@ -1,129 +1,200 @@
 # Togo Voice Intake
 
-A phone-based AI intake agent for **Togo AI Automation**. Callers reach a public number,
-the agent asks seven structured questions about their business and pain points, reads the
-answers back to confirm, and hangs up politely. Every call is POSTed to an n8n webhook,
-which fans out to email and Airtable.
+A self-hosted inbound voice agent that answers a real phone number, asks seven
+structured intake questions, reads the answers back to confirm, and posts the
+lead to n8n. Built on LiveKit + Deepgram + Cartesia + Claude — no managed voice
+platform in between.
 
-The agent only asks and records. It never pitches, quotes prices, or answers questions
-about the company — off-script questions are captured verbatim for a human to follow up on.
+The interesting problem was not the pipeline. It was knowing when the caller had
+finished talking.
 
-## Setup
+> **Cold starts.** The worker runs on LiveKit Cloud and is not kept warm, so the
+> first call after an idle period takes several seconds before the agent speaks.
+> Steady state is ~700ms time-to-first-token.
 
-Requires Python 3.11+.
+---
 
-```bash
-python -m venv .venv
-.venv/Scripts/activate        # Windows
-# source .venv/bin/activate   # macOS / Linux
+## What building this taught me about turn-taking
 
-pip install -r requirements.txt
+Four layers, added in this order. Each one because the previous layer failed on a
+real call.
 
-cp .env.example .env          # then fill in the real values
-```
+**1. Silero VAD** — `VAD_MIN_SILENCE_DURATION = 0.65s`
 
-You need accounts and API keys for **LiveKit Cloud**, **Deepgram**, **Cartesia**, and
-**Anthropic**, plus the n8n webhook URL. Nothing runs until `.env` has real values.
+Catches the acoustic boundary. On its own it is too eager: a caller pausing to
+think reads as finished.
 
-## Run it
+**2. Semantic end-of-turn model** — `EOU_UNLIKELY_THRESHOLD = 0.35`
 
-Talk to the agent through your laptop microphone — no phone number or LiveKit room needed:
+The endpointing delay is binary, not gradual. EOU probability ≥ 0.35 waits
+`MIN_ENDPOINTING_DELAY` (1.3s); below it waits `MAX_ENDPOINTING_DELAY` (3.0s).
 
-```bash
-python agent/main.py console
-```
+The threshold sits between two real call samples — **0.43** (caller genuinely
+done) and **0.17** (caller mid-thought). It is not a default; it is two data
+points.
 
-Connect a worker to LiveKit so it can take real calls (Phase 2):
+`MIN_ENDPOINTING_DELAY` started at 0.8s and went to 1.3s after the first real
+phone call, where callers were being cut off mid-sentence.
 
-```bash
-python agent/main.py dev      # or `start` in production
-```
+**3. Deepgram endpointing** — `STT_ENDPOINTING_MS = 40`
 
-## Tests
+Deliberately low. This only controls how fast interim transcripts finalise; it
+does not make turn decisions.
 
-```bash
-pytest
-```
+**4. Lexical unfinished-detection** — `agent/turns.py`
 
-Covers the rate-limit logic (including the midnight reset and the $10/day spend math),
-the lead payload shape, webhook retry + disk fallback, and caller-ID handling in console
-mode. No network calls, no API keys.
+The semantic model scored **"The company's name is"** at **0.96** — confidently
+certain the caller was done, mid-noun-phrase. No threshold tuning fixes that
+class of error, because the model is not uncertain. It is wrong.
 
-### Simulate a whole call without a microphone
+So a cheap lexical layer sits underneath it: if a turn ends on a comma, on a
+dangling word (`the`, `is`, `and`, `um`…), or on a bare filler, the turn is held,
+the fragment is buffered onto the next one, and the agent nudges gently after
+`DANGLING_NUDGE_SECONDS = 4.0`. Capped at `MAX_CONSECUTIVE_HOLDS = 2` so a silent
+caller cannot deadlock the conversation.
 
-```bash
-python scripts/simulate_call.py          # print the captured lead + payload
-python scripts/simulate_call.py --post    # also POST it to N8N_WEBHOOK_URL
-```
+Exceptions are hardcoded — "I think so", "I guess" end on a dangling word but are
+complete answers.
 
-Plays a scripted business owner through all seven questions against the real Claude
-model and the real tools — no STT, no TTS, no audio. It checks that the seven questions
-are asked, that `capture_lead` accumulates them, that the planted pricing question is
-deflected into `take_message` rather than answered, and that the readback happens before
-the goodbye. Costs a few cents of Anthropic usage.
+---
 
-This is the fastest way to check a prompt change didn't break the script. It cannot tell
-you how the turn-taking *feels* — only a real console call can.
+## Latency work
+
+Measured by hand and recorded in commits. There is **no persistent
+instrumentation** — which means a model swap or a region change would require
+redoing this measurement from scratch. That is a real gap, not a nitpick.
+
+| Change | Effect |
+| --- | --- |
+| Strict tool schema | TTFT p50 **1730ms → 897ms** |
+| Warmed TLS connection at prewarm | first request **4–7s → <1s** |
+| `PREEMPTIVE_GENERATION` | starts the LLM before turn commit, hiding TTFT |
+
+Steady state: ~700ms time-to-first-token, ~1000ms per turn.
+
+---
 
 ## How a call flows
 
 ```
 Inbound call → Twilio → LiveKit SIP → this worker
   ├─ rate limits checked BEFORE any STT/LLM runs
-  ├─ Deepgram STT · Claude (Haiku) · Cartesia TTS · Silero VAD
+  ├─ Deepgram STT · Claude Haiku · Cartesia TTS · Silero VAD
   ├─ tools: capture_lead (the 7 answers) · take_message (off-script questions)
   └─ on call end (any reason) → POST to N8N_WEBHOOK_URL
 ```
 
-### Rate limiting
+The agent only asks and records. It never pitches, quotes prices, or answers
+questions about the company — off-script questions are captured verbatim via
+`take_message` for a human to follow up on. `LLM_TEMPERATURE` is low on purpose:
+the agent must never improvise a fact about the business.
 
-Three layers, all backed by one SQLite file (`RATE_LIMIT_DB_PATH`). Counters reset at
-midnight America/Winnipeg — there's no cron job; "today" is just derived from the local
-wall clock.
+Interruption handling is configured, not implemented — `MIN_INTERRUPTION_DURATION
+= 0.6s` and `MIN_INTERRUPTION_WORDS = 2` are passed to livekit-agents so a cough
+does not stop the agent mid-sentence. The mechanism itself lives in the library.
+
+---
+
+## Rate limiting
+
+Three layers over one SQLite file. Counters reset at midnight America/Winnipeg —
+there is no cron job; "today" is derived from the local wall clock.
 
 | Layer | Default | What happens when it trips |
-|---|---|---|
-| Daily calls | 50/day | Answer, speak one polite line, hang up. No STT/LLM is started. |
-| Daily spend | $10/day (estimated at $0.08/min) | Same. |
+| --- | --- | --- |
+| Daily calls | 50/day | Answer, speak one polite line, hang up. No STT/LLM starts. |
+| Daily spend | $10/day (est. $0.08/min) | Same. |
 | Per caller | 3/day per caller ID | Same, with a caller-specific line. |
-| Per call | 10 minutes | Forced wrap-up: contact info first if missing, then readback, then a polite goodbye. Never an abrupt cut. |
+| Per call | 10 minutes | Forced wrap-up: contact info, then readback, then goodbye. Never an abrupt cut. |
 
-Every limit is an environment variable — raise the daily cap from 50 to 100, or the budget
-from $10 to $20, by editing `.env` and restarting. No code change.
+Every limit is an environment variable. Raising the daily cap or the budget is an
+`.env` edit and a restart, not a code change.
 
-### Nothing loses a lead
+The checks run before any STT or LLM call starts, so a runaway does not cost
+money before it is stopped.
 
-On call end the worker POSTs the payload to n8n and retries three times with exponential
-backoff. If all three fail, the payload is written to `failed_webhooks/<call_id>.json` so
-it can be replayed by hand. A webhook outage never takes down a call.
+---
+
+## Nothing loses a lead
+
+On call end the worker POSTs to n8n and retries three times with exponential
+backoff. If all three fail the payload is written to
+`failed_webhooks/<call_id>.json` for manual replay. A webhook outage never takes
+down a call.
 
 Each payload carries running daily stats (`calls_today`, `minutes_today`,
-`leads_captured_today`) so n8n can build a daily report without querying anything.
+`leads_captured_today`) so n8n can build a daily report without querying
+anything.
 
-A lead is only marked `completed` if all seven answers **and** contact info are present.
-Calls that end without contact info are still delivered — flagged incomplete, so a human
-can see what was missed.
+A lead is marked `completed` only if all seven answers and contact info are
+present. Calls that end without contact info are still delivered, flagged
+incomplete, so a human can see what was missed.
 
-## Tuning the conversation
+---
 
-Endpointing that's too aggressive makes the agent talk over people mid-sentence. All the
-VAD and turn-taking values are named constants at the top of [agent/main.py](agent/main.py)
-and start deliberately conservative:
+## Testing
 
-- `MIN_ENDPOINTING_DELAY` — silence a caller must leave before we consider them done. Raise
-  it if callers get cut off; lower it if the agent feels sluggish.
-- `VAD_MIN_SILENCE_DURATION` — how much silence ends a speech segment. Generous, so a caller
-  pausing to think isn't treated as finished.
-- `MIN_INTERRUPTION_DURATION` / `MIN_INTERRUPTION_WORDS` — require real speech to interrupt,
-  not a cough.
+```bash
+pytest
+```
 
-`LLM_TEMPERATURE` is low on purpose: the agent must never improvise facts.
+Covers rate-limit logic (including the midnight reset and the spend math), lead
+payload shape, webhook retry + disk fallback, and caller-ID handling in console
+mode. No network calls, no API keys.
 
-## Adding a language later
+```bash
+python scripts/simulate_call.py          # print the captured lead + payload
+python scripts/simulate_call.py --post   # also POST to N8N_WEBHOOK_URL
+```
 
-Language selection is isolated to [agent/prompts.py](agent/prompts.py). To add Mandarin,
-add one `LanguageProfile` to `LANGUAGES` and drop `prompts/system_prompt.zh.md` beside the
-English one. Nothing else changes.
+Plays a scripted business owner through all seven questions against the real
+Claude model and the real tools — no STT, no TTS, no audio. It checks that all
+seven questions are asked, that `capture_lead` accumulates them, that a planted
+pricing question is deflected into `take_message` rather than answered, and that
+the readback happens before the goodbye. Costs a few cents of Anthropic usage.
+
+This is the fastest way to check a prompt change did not break the script. **It
+cannot tell you how the turn-taking feels** — only a real console call can. The
+two failure modes this project actually has (cut-off callers, agent talking over
+someone) are both invisible to it.
+
+Tests are run by hand. There is no CI.
+
+---
+
+## Running it
+
+Requires Python 3.11+.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate     # .venv/Scripts/activate on Windows
+pip install -r requirements.txt
+cp .env.example .env          # then fill in real values
+```
+
+You need accounts and keys for LiveKit Cloud, Deepgram, Cartesia, and Anthropic,
+plus the n8n webhook URL. Nothing runs until `.env` has real values.
+
+```bash
+python agent/main.py console   # talk through your laptop mic, no phone needed
+python agent/main.py dev       # connect a worker to LiveKit for real calls
+python agent/main.py start     # production
+```
+
+Deployment is a two-stage Docker build to LiveKit Cloud (`us-east`, agent name
+`togo-intake`). Secrets are injected as LiveKit Cloud secrets, not baked into the
+image.
+
+---
+
+## Adding a language
+
+Language selection is isolated to `agent/prompts.py`. To add Mandarin: add one
+`LanguageProfile` to `LANGUAGES` and drop `prompts/system_prompt.zh.md` beside
+the English one. Nothing else changes.
+
+---
 
 ## Layout
 
@@ -132,9 +203,25 @@ agent/
   main.py      worker entrypoint, tuning constants, call lifecycle
   prompts.py   language selection (prompt + STT/TTS locale + voice)
   tools.py     CallState, Lead, capture_lead, take_message
+  turns.py     lexical unfinished-turn detection
   limits.py    three-layer rate limiting (SQLite)
   postcall.py  webhook POST with retries + disk fallback
 prompts/
-  system_prompt.md    the agent's persona and 7-question script
+  system_prompt.md    persona and the 7-question script
 tests/
+scripts/
+  simulate_call.py    full-script dry run, no audio
 ```
+
+---
+
+## Known limits
+
+- **No persistent latency instrumentation.** The numbers above are hand-measured
+  and recorded in commits. Re-measuring after a model or region change means
+  redoing the work.
+- **Cold start on every idle period.** Not kept warm; the first caller waits.
+- **No CI.** Tests pass when someone remembers to run them.
+- **Single tenant, single number.** No auth, no per-client isolation.
+- **Interruption handling is library-provided.** Two thresholds are tuned; the
+  mechanism is not mine.
